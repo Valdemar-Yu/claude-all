@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# cc-gpt-plbbl — 把 Claude Code 经 claudish 接到第三方 GPT 订阅/中转站(plbbl 为默认示例)。
+# 原理见 docs/how-it-works.md;排错见 docs/troubleshooting.md。
+set -euo pipefail
+
+# 解析自身真实路径(跨 symlink,兼容 macOS 无 readlink -f),定位 lib
+_SOURCE="${BASH_SOURCE[0]:-$0}"
+while [ -L "$_SOURCE" ]; do
+  _DIR="$(cd -P "$(dirname "$_SOURCE")" >/dev/null 2>&1 && pwd)"
+  _SOURCE="$(readlink "$_SOURCE")"
+  case "$_SOURCE" in /*) : ;; *) _SOURCE="$_DIR/$_SOURCE" ;; esac
+done
+_SELF_DIR="$(cd -P "$(dirname "$_SOURCE")" >/dev/null 2>&1 && pwd)"
+
+# 找 lib:wrapper 旁的 ../lib > 安装前缀 > 同目录 lib
+_LIB=""
+for _d in "$_SELF_DIR/../lib" "$HOME/.local/share/cc-gpt-plbbl/lib" "$_SELF_DIR/lib"; do
+  if [ -f "$_d/config.sh" ]; then _LIB="$_d"; break; fi
+done
+if [ -z "${_LIB:-}" ]; then
+  echo "[cc-gpt-plbbl] 找不到 lib/config.sh。重装:curl -fsSL <repo>/install.sh | bash" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$_LIB/config.sh"
+source "$_LIB/token.sh"
+
+# 解析 token
+_ccgp_resolve_token || {
+  echo "[cc-gpt-plbbl] 没解析到 token。设置 \$CCGP_TOKEN,或在 $CCGP_CONFIG_FILE 写 token= / token_cmd=,或用 CC Switch。" >&2
+  exit 1
+}
+
+# provider 决定 env 名:oai 一等公民(工具调用稳);litellm 通用但偶发残缺 tool call
+case "$CCGP_PROVIDER" in
+  oai)     _ENV_PREFIX="OPENAI" ;;
+  litellm) _ENV_PREFIX="LITELLM" ;;
+  *) echo "[cc-gpt-plbbl] 未知 provider '$CCGP_PROVIDER'(用 oai 或 litellm)" >&2; exit 1 ;;
+esac
+export "${_ENV_PREFIX}_BASE_URL=$CCGP_BASE_URL"
+export "${_ENV_PREFIX}_API_KEY=$CCGP_TOKEN"
+
+# 独立 config 目录:避开 ~/.claude 里 CC Switch 等写入的 ANTHROPIC_* 污染(否则 claudish 代理被覆盖 → 403)
+export CLAUDE_CONFIG_DIR="$CCGP_CONFIG_DIR"
+
+# --model/-m、--effort 已显式传则不覆盖默认
+case " $* " in
+  *" --model "*|*" -m "*) _MODEL_ARGS=() ;;
+  *) _MODEL_ARGS=(--model "$CCGP_MODEL") ;;
+esac
+case " $* " in
+  *" --effort "*) _EFFORT_ARGS=() ;;
+  *) _EFFORT_ARGS=(--effort "$CCGP_EFFORT") ;;
+esac
+
+# 空数组用 ${arr[@]+"${arr[@]}"} 规避 macOS bash 3.2 + set -u 的 unbound 报错
+exec claudish ${_MODEL_ARGS[@]+"${_MODEL_ARGS[@]}"} ${_EFFORT_ARGS[@]+"${_EFFORT_ARGS[@]}"} "$@"

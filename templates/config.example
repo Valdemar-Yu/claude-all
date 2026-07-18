@@ -1,0 +1,24 @@
+# cc-gpt-plbbl 配置文件示例
+# 复制到 ~/.config/cc-gpt-plbbl/config,按需改。格式 key=value,注释用 #。
+
+# 第三方 GPT 中转的 OpenAI 协议 base_url(plbbl 示例;同类中转换成自己的)
+base_url=https://plbbl.com/t/<your-group>
+
+# 默认模型,claudish 的 provider@model 语法。可用模型见 docs/providers.md
+model=oai@gpt-5.6-sol
+
+# reasoning effort:none/minimal/low/medium/high/xhigh/max
+effort=xhigh
+
+# claudish provider:oai(推荐,工具调用稳)/ litellm(通用,偶发残缺 tool call)
+provider=oai
+
+# 独立 Claude Code config 目录(避开 ~/.claude 被污染)
+config_dir=~/.claude-ccgpt
+
+# 是否 symlink projects 到 ~/.claude/projects(yes=与官方 claude 共享 session+memory)
+share_projects=yes
+
+# token 三选一,留空则按优先级自动找:env $CCGP_TOKEN > token= > token_cmd > cc-switch db
+# token=sk-xxxxxxxx
+# token_cmd=op read 'op://Vault/plbbl/token'
