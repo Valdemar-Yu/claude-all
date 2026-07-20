@@ -8,6 +8,18 @@
 
 **解法**:用 cc-gpt-plbbl 启动(它锁独立 config 目录),别直接敲 `claude`。检查 `~/.claude-ccgpt/settings.json` 不含 `ANTHROPIC_*`。
 
+## ⚠ Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set
+
+**根因**:claudish 启动 Claude Code 时会同时注入两个占位变量(`ANTHROPIC_API_KEY` 防 API key 弹窗、`ANTHROPIC_AUTH_TOKEN` 防 login 界面),真实认证由 claudish 本地代理完成。新版 Claude Code 检测到双变量就警告。无害,但吵。
+
+**解法**:install 已自动 patch 全局 claudish(删掉 `ANTHROPIC_API_KEY` 占位行,只留 `ANTHROPIC_AUTH_TOKEN`——warning 文本认可的官方路径)。claudish 升级会还原,重跑:
+
+```
+bash ~/.local/share/cc-gpt-plbbl/lib/patch-claudish.sh
+```
+
+原文件备份在 claudish 包内 `dist/index.js.ccgpt-bak`,要还原直接 `cp` 覆盖。
+
 ## ⚠️ Tool call "Bash" failed: missing required parameters: command
 
 **根因**:claudish 的 `litellm` provider 工具调用翻译偶发残缺(跨模型都中招)。claudish 把后端返回的 tool call 解析出缺参数,作为文本报给你——会话没崩,但那次工具调用没执行。

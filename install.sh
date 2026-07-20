@@ -17,6 +17,9 @@ command -v claude  >/dev/null 2>&1 || die "没找到 claude CLI。先装 Claude 
 command -v claudish >/dev/null 2>&1 || die "没找到 claudish(协议翻译层)。装:npm i -g claudish (>=7.12)"
 command -v sqlite3 >/dev/null 2>&1 || warn "没 sqlite3 → CC Switch 自动取 token 不可用,需手动配 token="
 
+# ---- 1.5 patch claudish(消除 Claude Code Both-set 警告;幂等,失败不中断)----
+bash "$SELF_DIR/lib/patch-claudish.sh" || warn "claudish patch 失败(不影响功能,仅启动有警告噪音)。可手动重跑:bash $PREFIX/lib/patch-claudish.sh"
+
 # ---- 2. 读默认值(lib/config.sh)----
 source "$SELF_DIR/lib/config.sh"
 

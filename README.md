@@ -67,7 +67,7 @@ token 优先级:env `$CCGP_TOKEN` > `token=` > `token_cmd=` > CC Switch db(按 b
 ## 原理 / 排错
 
 - [工作原理](docs/how-it-works.md):协议翻译、config 隔离、symlink 共享、为什么用 oai
-- [排错](docs/troubleshooting.md):403、`missing required parameters`、`.claude.json` 被冲、bash unbound
+- [排错](docs/troubleshooting.md):403、`missing required parameters`、`.claude.json` 被冲、Both-set 警告、bash unbound
 - [已测模型](docs/providers.md):plbbl 模型矩阵 + 同类中转怎么配
 
 ## 卸载

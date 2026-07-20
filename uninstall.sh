@@ -22,3 +22,4 @@ fi
 
 info "完成。配置文件 ~/.config/cc-gpt-plbbl/config 保留(手动删:rm -rf ~/.config/cc-gpt-plbbl)。"
 info "~/.claude 和官方 claude 未受影响。"
+info "注:install 时对 claudish 的 patch(若有)未还原,备份在 claudish 包内 dist/index.js.ccgpt-bak,无害。"
