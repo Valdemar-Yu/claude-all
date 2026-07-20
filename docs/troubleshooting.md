@@ -48,3 +48,9 @@ cp ~/.claude/backups/.claude.json.backup.<最大那个> ~/.claude/.claude.json
 - `claude` / `claudish` 没装 → install 时会检查并提示。
 - `~/.local/bin` 不在 PATH → install 会提示,按提示加。
 - token 没配好 → `cc-gpt-plbbl` 报「没解析到 token」,按提示配 `token=` 或 `token_cmd=`。
+
+## claude-all 里选 claude 走的不是想要的源
+
+**根因**:`claude` 是 cmd 型内置 profile,原样 exec 官方 CLI——它读 `~/.claude/settings.json` 里的 env,也就是 CC Switch 的当前源。claude-all 不管这块。
+
+**解法**:去 CC Switch 切当前源;或 `claude-all add` 加一个 direct 型 profile(独立 env,不受 CC Switch 影响)。

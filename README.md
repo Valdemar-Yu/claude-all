@@ -17,6 +17,7 @@ cc-gpt-plbbl 在中间加一层 claudish 翻译,并把踩过的坑都封掉:
 - config 隔离(不污染、也不被 CC Switch 污染官方 `~/.claude`)
 - 历史共享(独立 dir + projects symlink,可 resume 官方 claude 的 session + memory)
 - `.claude.json` 防护(install 自动 backup)
+- `claude-all` 多环境菜单:聚合 claude / claude-glm / claude-plbbl / claude-fugu 等现有启动命令,菜单内可 Add 新 API
 
 ## 前置
 
@@ -48,6 +49,19 @@ cc-gpt-plbbl -r                                  # resume 官方 claude 的历�
 cc-gpt-plbbl -i --model oai@gpt-5.3-codex-spark  # 切模型(更快)
 cc-gpt-plbbl -i --effort high                    # 降档(xhigh 太慢时)
 ```
+
+### claude-all:多环境选择菜单
+
+裸运行弹出方向键菜单,聚合现有启动命令(install 自动发现 claude / claude-glm / claude-plbbl / claude-fugu)与自加 API,选中进入对应环境:
+
+```bash
+claude-all                  # 菜单(↑/↓ 移动,Enter 确认,q 退出;末项 [+ Add new API])
+claude-all add              # 添加新 API(名称/协议/base_url/key/model → ~/.claude-all/profiles/<名>.env)
+claude-all list             # 列出全部环境
+claude-all claude-plbbl -i  # 跳过菜单直接启动,参数透传
+```
+
+profile 三种类型:`cmd`(聚合现成命令)、`direct`(Anthropic 兼容 API 直连)、`claudish`(OpenAI 协议经 claudish 翻译)。模板见 [`profiles/`](profiles/) 下的 `*.env.example`;真实 profile 在 `~/.claude-all/profiles/`(700/600,`*.env` 已 gitignore),删除即 `rm` 对应文件。菜单交互思路借鉴 [WaldronZ/scripts](https://github.com/WaldronZ/scripts)。
 
 ## 配置
 

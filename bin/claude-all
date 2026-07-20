@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+# claude-all — 多 API 环境选择启动器。
+# 裸运行弹方向键菜单,聚合现有启动命令(claude / claude-glm / claude-plbbl / claude-fugu)
+# 与 ~/.claude-all/profiles/*.env 里自加的 API;选中后进入对应 Claude Code 环境。
+# 菜单交互思路借鉴 https://github.com/WaldronZ/scripts 的 claude-code/claude_model_menu.sh。
+#
+# 用法:
+#   claude-all                  菜单(最后一项 [+ Add new API] 进入添加向导)
+#   claude-all list             列出全部 profile
+#   claude-all add              添加向导(同菜单 Add 项)
+#   claude-all <name> [args..]  跳过菜单直接启动,args 透传
+# 环境变量:
+#   CLAUDE_ALL_PROFILES_DIR     profile 目录(默认 ~/.claude-all/profiles)
+#   CLAUDE_ALL_DRY_RUN=1        不 exec,只打印将要设置的 env 和命令(测试用)
+set -euo pipefail
+
+PROFILES_DIR="${CLAUDE_ALL_PROFILES_DIR:-$HOME/.claude-all/profiles}"
+ADD_MARK="__add__"
+
+c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
+info()  { echo "$(c '1;36' '[claude-all]') $*"; }
+die()   { echo "$(c '1;31' '[claude-all]') $*" >&2; exit 1; }
+
+# ---- profiles 扫描 ----
+profiles=()
+while IFS= read -r f; do
+  [ -n "$f" ] && profiles+=("$(basename "$f" .env)")
+done < <(find "$PROFILES_DIR" -maxdepth 1 -name '*.env' 2>/dev/null | sort)
+
+# 读 profile 字段(grep 取值,不 source,避免污染环境)
+_field() { grep -E "^$2=" "$PROFILES_DIR/$1.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true; }
+
+label_of() {
+  local p="$1" lbl launch model
+  lbl="$(_field "$p" CLAUDE_ALL_LABEL)"
+  [ -n "$lbl" ] && { printf '%s (%s)' "$p" "$lbl"; return; }
+  launch="$(_field "$p" CLAUDE_ALL_LAUNCH)"
+  case "$launch" in
+    cmd) printf '%s (%s)' "$p" "$(_field "$p" CLAUDE_ALL_CMD)" ;;
+    *)   model="$(_field "$p" ANTHROPIC_MODEL)"; model="${model:-$(_field "$p" CLAUDE_ALL_MODEL)}"
+         [ -n "$model" ] && printf '%s (%s)' "$p" "$model" || printf '%s' "$p" ;;
+  esac
+}
+
+# ---- launch ----
+launch() {
+  local profile="$1"; shift
+  # 清掉可能干扰的残留变量(profile 里的值随后 source 进来)
+  local _residual _v
+  _residual=$(env | grep -oE '^(ANTHROPIC|CLAUDE_CODE|OPENAI|LITELLM)_[A-Z0-9_]+' | cut -d= -f1 || true)
+  for _v in $_residual; do unset "$_v" 2>/dev/null || true; done
+  unset CLAUDE_CONFIG_DIR 2>/dev/null || true
+
+  set -a
+  # shellcheck disable=SC1090
+  source "$PROFILES_DIR/$profile.env"
+  set +a
+  : "${CLAUDE_ALL_LAUNCH:=direct}"
+
+  if [ "${CLAUDE_ALL_DRY_RUN:-0}" = "1" ]; then
+    echo "[dry-run] profile=$profile launch=$CLAUDE_ALL_LAUNCH"
+    env | grep -E '^(ANTHROPIC|OPENAI|LITELLM|CLAUDE)_' | sort | sed -E 's/((KEY|TOKEN)=)(.{8}).*/\1\3.../' || true
+    case "$CLAUDE_ALL_LAUNCH" in
+      cmd)      echo "[dry-run] would exec: $CLAUDE_ALL_CMD $*" ;;
+      direct)   echo "[dry-run] would exec: claude $*  (CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude-all})" ;;
+      claudish) echo "[dry-run] would exec: claudish --model ${CLAUDE_ALL_MODEL:-?} $*  (CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude-all})" ;;
+    esac
+    return 0
+  fi
+
+  info "启动:$(label_of "$profile")"
+  case "$CLAUDE_ALL_LAUNCH" in
+    cmd)
+      [ -n "${CLAUDE_ALL_CMD:-}" ] || die "profile '$profile' 缺 CLAUDE_ALL_CMD"
+      exec "$CLAUDE_ALL_CMD" "$@" ;;
+    direct)
+      export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
+      exec claude "$@" ;;
+    claudish)
+      export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
+      [ -n "${CLAUDE_ALL_MODEL:-}" ] || die "profile '$profile' 缺 CLAUDE_ALL_MODEL"
+      local _e=(); [ -n "${CLAUDE_ALL_EFFORT:-}" ] && _e=(--effort "$CLAUDE_ALL_EFFORT")
+      exec claudish --model "$CLAUDE_ALL_MODEL" ${_e[@]+"${_e[@]}"} "$@" ;;
+    *) die "profile '$profile' 未知 CLAUDE_ALL_LAUNCH='$CLAUDE_ALL_LAUNCH'(cmd/direct/claudish)" ;;
+  esac
+}
+
+# ---- Add 向导 ----
+add_wizard() {
+  mkdir -p "$PROFILES_DIR"; chmod 700 "$PROFILES_DIR" 2>/dev/null || true
+  local name proto base key model small go ow
+  printf 'API 名称(小写字母/数字/连字符): ' >&2; read -r name
+  case "$name" in
+    ''|*[!a-z0-9-]*) die "名称不合法(只能小写字母/数字/连字符)" ;;
+  esac
+  if [ -f "$PROFILES_DIR/$name.env" ]; then
+    printf "'%s' 已存在,覆盖? y/N: " "$name" >&2; read -r ow
+    [ "$ow" = y ] || { info "取消"; exit 0; }
+  fi
+  printf '协议 anthropic/openai [anthropic]: ' >&2; read -r proto
+  proto="${proto:-anthropic}"
+  case "$proto" in anthropic|openai) : ;; *) die "协议只能是 anthropic 或 openai" ;; esac
+  printf 'base_url: ' >&2; read -r base
+  [ -n "$base" ] || die "base_url 不能为空"
+  printf 'api_key(输入不回显): ' >&2; read -rs key; printf '\n' >&2
+  [ -n "$key" ] || die "api_key 不能为空"
+  printf 'model: ' >&2; read -r model
+  [ -n "$model" ] || die "model 不能为空"
+
+  umask 077
+  if [ "$proto" = anthropic ]; then
+    printf '小模型(Haiku/子代理槽位,回车同 model): ' >&2; read -r small
+    small="${small:-$model}"
+    cat > "$PROFILES_DIR/$name.env" <<EOF
+# $name — claude-all profile(add 向导生成)
+# Anthropic 兼容 API(支持 /v1/messages),直连。
+CLAUDE_ALL_LAUNCH=direct
+ANTHROPIC_BASE_URL="$base"
+ANTHROPIC_AUTH_TOKEN="$key"
+ANTHROPIC_MODEL="$model"
+ANTHROPIC_DEFAULT_OPUS_MODEL="$model"
+ANTHROPIC_DEFAULT_SONNET_MODEL="$model"
+ANTHROPIC_DEFAULT_FABLE_MODEL="$model"
+ANTHROPIC_DEFAULT_HAIKU_MODEL="$small"
+CLAUDE_CODE_SUBAGENT_MODEL="$small"
+EOF
+  else
+    # claudish 的 oai provider 要求 oai@ 前缀;用户已带前缀则不重复加
+    local cmodel
+    case "$model" in *@*) cmodel="$model" ;; *) cmodel="oai@$model" ;; esac
+    cat > "$PROFILES_DIR/$name.env" <<EOF
+# $name — claude-all profile(add 向导生成)
+# OpenAI 协议 API(/v1/chat/completions),经 claudish 翻译。可加 CLAUDE_ALL_EFFORT=high 等。
+CLAUDE_ALL_LAUNCH=claudish
+OPENAI_BASE_URL="$base"
+OPENAI_API_KEY="$key"
+CLAUDE_ALL_MODEL="$cmodel"
+EOF
+  fi
+  chmod 600 "$PROFILES_DIR/$name.env"
+  info "已保存:$PROFILES_DIR/$name.env (600)"
+  printf '现在启动吗? y/N: ' >&2; read -r go
+  if [ "$go" = y ]; then launch "$name"; else info "重跑 claude-all 即可在菜单看到 '$name'"; fi
+}
+
+# ---- 菜单 ----
+choose_menu() {
+  local total=$(( ${#profiles[@]} + 1 ))   # +1 个 Add 项
+  local add_idx=$(( total - 1 ))
+  local selected=0 rendered=0
+  local menu_lines=$(( total + 3 ))
+  local key rest index label mark prefix input
+
+  item_label() {
+    if [ "$1" -eq "$add_idx" ]; then printf '[+ Add new API]'; else label_of "${profiles[$1]}"; fi
+  }
+
+  render_menu() {
+    if [ "$rendered" -eq 1 ]; then printf "\033[%dA\033[J" "$menu_lines"; fi
+    rendered=1
+    printf "claude-all — 选择环境:\n"
+    for (( index=0; index<total; index++ )); do
+      label="$(item_label "$index")"
+      mark="[ ]"; [ "$selected" -eq "$index" ] && mark="[✓]"
+      prefix=" "; [ "$selected" -eq "$index" ] && prefix=">"
+      if [ "$selected" -eq "$index" ]; then
+        printf "%s %s \033[7m%s\033[0m\n" "$prefix" "$mark" "$label"
+      else
+        printf "%s %s %s\n" "$prefix" "$mark" "$label"
+      fi
+    done
+    printf "\n↑/↓ 移动,Enter/Space 确认,q 退出\n"
+  }
+
+  # 非 tty:数字选择回退
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "claude-all — 选择环境:"
+    for (( index=0; index<total; index++ )); do
+      printf "  %d) %s\n" "$(( index + 1 ))" "$(item_label "$index")"
+    done
+    read -r -p "选择 [1]: " input
+    input="${input:-1}"
+    case "$input" in
+      q|Q) echo "取消"; exit 0 ;;
+      *[!0-9]*) die "无效选择:$input" ;;
+    esac
+    if [ "$input" -lt 1 ] || [ "$input" -gt "$total" ]; then die "无效选择:$input"; fi
+    [ "$input" -eq "$total" ] && return 2   # Add 项
+    SELECTED_PROFILE="${profiles[$(( input - 1 ))]}"
+    return 0
+  fi
+
+  trap 'printf "\033[?25h"; exit 130' INT TERM
+  printf "\033[?25l"
+  render_menu
+  while true; do
+    IFS= read -rsn1 key
+    case "$key" in
+      $'\x1b')
+        IFS= read -rsn2 -t 1 rest || true
+        case "$rest" in
+          "[A"|"OA"|"[D"|"OD") selected=$(( (selected + total - 1) % total )) ;;
+          "[B"|"OB"|"[C"|"OC") selected=$(( (selected + 1) % total )) ;;
+        esac ;;
+      " "|"") break ;;
+      q|Q) printf "\033[?25h\n取消\n"; exit 0 ;;
+    esac
+    render_menu
+  done
+  printf "\033[?25h\n"
+  trap - INT TERM
+
+  [ "$selected" -eq "$add_idx" ] && return 2
+  SELECTED_PROFILE="${profiles[$selected]}"
+  return 0
+}
+
+usage() {
+  cat >&2 <<'EOF'
+用法:
+  claude-all                  弹出环境选择菜单(末项 [+ Add new API])
+  claude-all list             列出全部 profile
+  claude-all add              添加新 API
+  claude-all <name> [args..]  直接启动指定 profile,args 透传
+删除 profile:rm ~/.claude-all/profiles/<name>.env
+EOF
+  exit 2
+}
+
+# ---- 入口 ----
+case "${1:-}" in
+  list)
+    [ "${#profiles[@]}" -gt 0 ] || die "没有 profile。跑 claude-all add 添加,或先 install。"
+    for p in "${profiles[@]}"; do printf '  %s\n' "$(label_of "$p")"; done
+    exit 0 ;;
+  add) add_wizard; exit 0 ;;
+  -h|--help) usage ;;
+  "")
+    [ "${#profiles[@]}" -gt 0 ] || die "没有 profile(~/.claude-all/profiles 为空)。跑 claude-all add 添加,或重跑 install.sh 生成内置 profile。"
+    SELECTED_PROFILE=""
+    choose_menu || { rc=$?; [ "$rc" -eq 2 ] && { add_wizard; exit 0; }; exit "$rc"; }
+    launch "$SELECTED_PROFILE" ;;
+  *)
+    p="$1"; shift
+    [ -f "$PROFILES_DIR/$p.env" ] || { echo "[claude-all] 未知 profile '$p'" >&2; usage; }
+    launch "$p" "$@" ;;
+esac

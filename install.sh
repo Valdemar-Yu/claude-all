@@ -70,13 +70,44 @@ fi
 mkdir -p "$PREFIX" "$BINDIR"
 rm -rf "$PREFIX/bin" "$PREFIX/lib"
 cp -r "$SELF_DIR/bin" "$SELF_DIR/lib" "$PREFIX/"
-chmod +x "$PREFIX/bin/cc-gpt-plbbl"
+chmod +x "$PREFIX/bin/cc-gpt-plbbl" "$PREFIX/bin/claude-all"
 if echo ":$PATH:" | grep -q ":$BINDIR:"; then
   ln -sfn "$PREFIX/bin/cc-gpt-plbbl" "$BINDIR/cc-gpt-plbbl"
-  info "入口:$BINDIR/cc-gpt-plbbl"
+  ln -sfn "$PREFIX/bin/claude-all" "$BINDIR/claude-all"
+  info "入口:$BINDIR/cc-gpt-plbbl、$BINDIR/claude-all"
 else
   warn "$BINDIR 不在 PATH。加:export PATH=\"$BINDIR:\$PATH\",或直接用 $PREFIX/bin/cc-gpt-plbbl"
 fi
+
+# ---- 6.5 claude-all:统一环境目录 + 内置 profile ----
+ALLDIR="$HOME/.claude-all"
+mkdir -p "$ALLDIR/profiles"
+chmod 700 "$ALLDIR/profiles"
+[ -f "$ALLDIR/settings.json" ] || cp "$SELF_DIR/templates/settings.json" "$ALLDIR/settings.json"
+if [ ! -f "$ALLDIR/.claude.json" ] && [ -f "$HOME/.claude/.claude.json" ]; then
+  cp "$HOME/.claude/.claude.json" "$ALLDIR/.claude.json" 2>/dev/null || true
+fi
+if [ -d "$HOME/.claude/projects" ]; then
+  ln -sfn "$HOME/.claude/projects" "$ALLDIR/projects"
+fi
+
+# 内置 profile(cmd 型,聚合 ~/.local/bin 已有启动脚本;已存在不覆盖)
+_mk_builtin() { # $1=名字 $2=命令 $3=label
+  [ -f "$ALLDIR/profiles/$1.env" ] && return 0
+  ( umask 077; cat > "$ALLDIR/profiles/$1.env" <<EOF
+# $1 — claude-all 内置 profile(install 生成,可改可删:rm $ALLDIR/profiles/$1.env)
+CLAUDE_ALL_LAUNCH=cmd
+CLAUDE_ALL_CMD="$2"
+CLAUDE_ALL_LABEL="$3"
+EOF
+  )
+  chmod 600 "$ALLDIR/profiles/$1.env"
+}
+command -v claude       >/dev/null 2>&1 && _mk_builtin claude       claude       "cc-switch 当前源"
+command -v claude-glm   >/dev/null 2>&1 && _mk_builtin claude-glm   claude-glm   "GLM (z.ai)"
+command -v claude-plbbl >/dev/null 2>&1 && _mk_builtin claude-plbbl claude-plbbl "plbbl GPT (claudish)"
+command -v claude-fugu  >/dev/null 2>&1 && _mk_builtin claude-fugu  claude-fugu  "Sakana Fugu (claudish)"
+info "claude-all 环境目录:$ALLDIR(菜单选 [+ Add new API] 或 claude-all add 可加新 API)"
 
 # ---- 7. 写配置文件 ----
 mkdir -p "$(dirname "$CONFIG_FILE")"
@@ -112,4 +143,4 @@ else
 fi
 
 echo
-info "$(c '1;32' '完成')。跑:cc-gpt-plbbl -i   |   切模型:cc-gpt-plbbl --model oai@gpt-5.3-codex-spark   |   排错:docs/troubleshooting.md"
+info "$(c '1;32' '完成')。跑:cc-gpt-plbbl -i   |   环境菜单:claude-all   |   切模型:cc-gpt-plbbl --model oai@gpt-5.3-codex-spark   |   排错:docs/troubleshooting.md"
