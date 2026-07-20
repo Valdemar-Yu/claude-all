@@ -1,5 +1,5 @@
-# cc-gpt-plbbl 配置文件示例
-# 复制到 ~/.config/cc-gpt-plbbl/config,按需改。格式 key=value,注释用 #。
+# claude-all 单实例(plbbl)配置示例
+# 复制到 ~/.config/claude-all/config,按需改。格式 key=value,注释用 #。
 
 # 第三方 GPT 中转的 OpenAI 协议 base_url(plbbl 示例;同类中转换成自己的)
 base_url=https://plbbl.com/t/<your-group>
@@ -14,7 +14,7 @@ effort=xhigh
 provider=oai
 
 # 独立 Claude Code config 目录(避开 ~/.claude 被污染)
-config_dir=~/.claude-ccgpt
+config_dir=~/.claude-plbbl
 
 # 是否 symlink projects 到 ~/.claude/projects(yes=与官方 claude 共享 session+memory)
 share_projects=yes

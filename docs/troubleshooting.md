@@ -6,7 +6,7 @@
 
 **根因**:Claude Code 直连了中转的 Anthropic 端点。中转是纯 OpenAI 协议,禁用了 `/v1/messages`。通常是 `CLAUDE_CONFIG_DIR` 指向了被污染的 `~/.claude`(其 settings.json 的 `ANTHROPIC_BASE_URL` 覆盖了 claudish 代理)。
 
-**解法**:用 cc-gpt-plbbl 启动(它锁独立 config 目录),别直接敲 `claude`。检查 `~/.claude-ccgpt/settings.json` 不含 `ANTHROPIC_*`。
+**解法**:用 cc-gpt-plbbl 启动(它锁独立 config 目录),别直接敲 `claude`。检查 `~/.claude-plbbl/settings.json` 不含 `ANTHROPIC_*`。
 
 ## ⚠ Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set
 
@@ -15,10 +15,10 @@
 **解法**:install 已自动 patch 全局 claudish(删掉 `ANTHROPIC_API_KEY` 占位行,只留 `ANTHROPIC_AUTH_TOKEN`——warning 文本认可的官方路径)。claudish 升级会还原,重跑:
 
 ```
-bash ~/.local/share/cc-gpt-plbbl/lib/patch-claudish.sh
+bash ~/.local/share/claude-all/lib/patch-claudish.sh
 ```
 
-原文件备份在 claudish 包内 `dist/index.js.ccgpt-bak`,要还原直接 `cp` 覆盖。
+原文件备份在 claudish 包内 `dist/index.js.claude-all-bak`,要还原直接 `cp` 覆盖。
 
 ## ⚠️ Tool call "Bash" failed: missing required parameters: command
 
@@ -30,7 +30,7 @@ bash ~/.local/share/cc-gpt-plbbl/lib/patch-claudish.sh
 
 **根因**:把 `CLAUDE_CONFIG_DIR` 锁到官方 `~/.claude`,且该目录 settings.json 与 claudish 冲突时,Claude Code 启动可能重置 `.claude.json`。
 
-**解法**:cc-gpt-plbbl 用独立目录规避;install 时自动 backup `~/.claude/.claude.json` 到 `.claude.json.ccgpt-bak.<ts>`。已发生的话,从 `~/.claude/backups/` 找最大的 backup 恢复:
+**解法**:cc-gpt-plbbl 用独立目录规避;install 时自动 backup `~/.claude/.claude.json` 到 `.claude.json.claude-all-bak.<ts>`。已发生的话,从 `~/.claude/backups/` 找最大的 backup 恢复:
 
 ```
 ls -lt ~/.claude/backups/.claude.json.backup.*   # 找最大的

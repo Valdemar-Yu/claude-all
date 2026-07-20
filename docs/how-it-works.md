@@ -1,6 +1,6 @@
 # 工作原理
 
-cc-gpt-plbbl 让 Claude Code(只懂 Anthropic `/v1/messages` 协议)用上第三方 GPT 订阅/中转站(只提供 OpenAI `/v1/chat/completions` 协议)。中间靠 **claudish** 做协议翻译。
+claude-all 让 Claude Code(只懂 Anthropic `/v1/messages` 协议)用上第三方 GPT 订阅/中转站(只提供 OpenAI `/v1/chat/completions` 协议)。中间靠 **claudish** 做协议翻译。
 
 ## 三层结构
 
@@ -18,7 +18,7 @@ Claude Code  ─(Anthropic /v1/messages)─▶  claudish  ─(OpenAI /v1/chat/co
 ### 为什么用独立 config 目录
 Claude Code 启动时读 `$CLAUDE_CONFIG_DIR/settings.json` 的 `env` 字段并强制应用。如果用官方 `~/.claude`(常被 CC Switch 之类工具写入了 `ANTHROPIC_BASE_URL=...`),这个 env 会**覆盖** claudish 设的本地代理地址,Claude Code 直连中转的 `/v1/messages` → 大多中转禁用该端点 → 403。
 
-所以 cc-gpt-plbbl 锁 `CLAUDE_CONFIG_DIR=~/.claude-ccgpt`,settings.json 保持干净(无 `ANTHROPIC_*`)。claudish 的代理地址才不被覆盖。
+所以单实例(cc-gpt-plbbl)锁 `CLAUDE_CONFIG_DIR=~/.claude-plbbl`,settings.json 保持干净(无 `ANTHROPIC_*`)。claudish 的代理地址才不被覆盖。
 
 ### 为什么 symlink projects
 独立 config 目录会让 session/memory 跟官方 claude 隔离。`projects` 软链到 `~/.claude/projects` 后,两边读写同一份 session 文件 → 可以 `cc-gpt-plbbl -r` resume 官方 claude 的历史,反之亦然。不想共享就配置 `share_projects=no`。

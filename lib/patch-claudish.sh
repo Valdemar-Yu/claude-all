@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# cc-gpt-plbbl — patch 全局 claudish:删掉它注入的 ANTHROPIC_API_KEY 占位符,只留 ANTHROPIC_AUTH_TOKEN。
+# claude-all — patch 全局 claudish:删掉它注入的 ANTHROPIC_API_KEY 占位符,只留 ANTHROPIC_AUTH_TOKEN。
 # 根因见 docs/troubleshooting.md「Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set」。
 # 幂等;claudish 升级会还原,重跑一次本脚本即可。
 set -euo pipefail
 
 c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
-info() { echo "$(c '1;36' '[cc-gpt-plbbl]') $*"; }
-warn() { echo "$(c '1;33' '[cc-gpt-plbbl]') $*" >&2; }
+info() { echo "$(c '1;36' '[claude-all]') $*"; }
+warn() { echo "$(c '1;33' '[claude-all]') $*" >&2; }
 
 command -v claudish >/dev/null 2>&1 || { warn "没找到 claudish,跳过 patch"; exit 0; }
 
@@ -25,7 +25,7 @@ if [ ! -f "$_DIST" ]; then
 fi
 
 # 幂等:已 patch 过直接退
-if grep -q 'cc-gpt-plbbl patch' "$_DIST"; then
+if grep -q 'claude-all patch' "$_DIST"; then
   info "claudish 已 patch,跳过"
   exit 0
 fi
@@ -37,8 +37,8 @@ if [ -z "${_LINE:-}" ]; then
   exit 0
 fi
 
-[ -f "$_DIST.ccgpt-bak" ] || cp "$_DIST" "$_DIST.ccgpt-bak"
-_PATCH_LINE='      /* cc-gpt-plbbl patch: 仅保留 ANTHROPIC_AUTH_TOKEN,消除 Claude Code Both-set 警告(原行见 index.js.ccgpt-bak) */'
+[ -f "$_DIST.claude-all-bak" ] || cp "$_DIST" "$_DIST.claude-all-bak"
+_PATCH_LINE='      /* claude-all patch: 仅保留 ANTHROPIC_AUTH_TOKEN,消除 Claude Code Both-set 警告(原行见 index.js.claude-all-bak) */'
 if sed --version >/dev/null 2>&1; then
   sed -i "${_LINE}s|.*|${_PATCH_LINE}|" "$_DIST"        # GNU sed (Linux)
 else
@@ -47,7 +47,7 @@ fi
 
 # 语法自检,挂了回滚
 if command -v node >/dev/null 2>&1 && ! node --check "$_DIST" 2>/dev/null; then
-  cp "$_DIST.ccgpt-bak" "$_DIST"
+  cp "$_DIST.claude-all-bak" "$_DIST"
   warn "patch 后语法检查失败,已回滚"
   exit 1
 fi

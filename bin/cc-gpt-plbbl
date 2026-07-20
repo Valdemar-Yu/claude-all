@@ -14,11 +14,11 @@ _SELF_DIR="$(cd -P "$(dirname "$_SOURCE")" >/dev/null 2>&1 && pwd)"
 
 # 找 lib:wrapper 旁的 ../lib > 安装前缀 > 同目录 lib
 _LIB=""
-for _d in "$_SELF_DIR/../lib" "$HOME/.local/share/cc-gpt-plbbl/lib" "$_SELF_DIR/lib"; do
+for _d in "$_SELF_DIR/../lib" "$HOME/.local/share/claude-all/lib" "$_SELF_DIR/lib"; do
   if [ -f "$_d/config.sh" ]; then _LIB="$_d"; break; fi
 done
 if [ -z "${_LIB:-}" ]; then
-  echo "[cc-gpt-plbbl] 找不到 lib/config.sh。重装:curl -fsSL <repo>/install.sh | bash" >&2
+  echo "[cc-gpt-plbbl] 找不到 lib/config.sh。重装:curl -fsSL https://github.com/Valdemar-Yu/claude-all/install.sh | bash" >&2
   exit 1
 fi
 # shellcheck source=/dev/null
