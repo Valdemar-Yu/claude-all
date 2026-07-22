@@ -28,3 +28,9 @@ claudish 的 `litellm` provider 是通用兼容层,工具调用(tool_use)翻译�
 
 ### token 从哪来
 优先级:env `$CCGP_TOKEN` > 配置文件 `token=` > `token_cmd=` 外部命令(op/pass)> CC Switch db 按 base_url 匹配。推荐 `token_cmd` 接密码管理器,token 不落盘。
+
+### Statusline 如何跨三种 launch 生效
+
+`direct` profile 从对应 `$CLAUDE_CONFIG_DIR/settings.json` 读取统一脚本。`cmd` profile 由外部 wrapper 自己的 config 目录读取；安装时可用 `CCGP_STATUSLINE_GLOBAL=1` 同时配置 `~/.claude` 和 `~/.claude-glm`。`claudish` 会生成临时 `--settings` 并覆盖用户 statusLine，所以 claude-all 给 claudish 加一个幂等 patch，使 `CLAUDISH_STATUSLINE_COMMAND` 和 `CLAUDISH_STATUSLINE_REFRESH` 能替换它的内置命令。
+
+账号池口令不经过 profile env，也不写进 settings。macOS 上由状态栏进程按配置的 service 从 Keychain 读取，只用于 HTTPS Cookie。

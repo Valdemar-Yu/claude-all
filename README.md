@@ -4,7 +4,7 @@
 >
 > **EN** — One menu for every Claude Code backend (official Claude, z.ai GLM, Sakana Fugu, third-party GPT relays like plbbl). Each backend runs in its own isolated config; sessions and memory stay shared. Install: `curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install.sh | bash`
 
-[安装](#安装) · [用法](#用法) · [隔离原理](#环境隔离原理) · [样例:接 plbbl](#样例接-plbbl-这类-openai-中转) · [排错](docs/troubleshooting.md)
+[安装](#安装) · [用法](#用法) · [隔离原理](#环境隔离原理) · [Statusline](#statusline) · [样例:接 plbbl](#样例接-plbbl-这类-openai-中转) · [排错](docs/troubleshooting.md)
 
 ## 解决什么问题
 
@@ -85,6 +85,22 @@ claude-all claude-plbbl -i  # 跳过菜单直接启动,参数透传
 
 Add 向导根据协议生成对应 profile:anthropic → `direct`,openai → `claudish`。删一个后端就是 `rm ~/.claude-all/profiles/<name>.env`。模板见 [`profiles/`](profiles/)。菜单交互思路借鉴 [WaldronZ/scripts](https://github.com/WaldronZ/scripts)。
 
+## Statusline
+
+claude-all 内置统一 Statusline，合并了 [`cc-statusline`](https://github.com/Valdemar-Yu/cc-statusline) 的 Claude 官方、Kimi Coding Plan、Z.ai GLM Coding Plan 配额，并支持可配置的 PLBBL 账号池周额度。
+
+```text
+🤖 gpt-5.6-sol ⚡xhigh  🧠 ██░░░░░░ 20% (40k/200k)  📅 周余 95% ↻6d10h  🕐 26-07-22 15:33
+```
+
+账号池额度会把多个账号的剩余额度归一化为 0–100%，并显示最近一次额度重置倒计时。账号池 URL 和 macOS Keychain service 从本地配置读取；仓库不保存访问口令、Cookie、账号或 token。主安装器配置 claude-all 管理的 config 目录；如需同时写入官方 Claude 和外部 GLM wrapper 的 settings：
+
+```bash
+CCGP_STATUSLINE_GLOBAL=1 CCGP_SKIP_PROBE=1 ./install.sh
+```
+
+完整字段、独立安装、缓存安全和 claudish 覆盖机制见 [`statusline/README.md`](statusline/README.md)。
+
 ## 样例:接 plbbl 这类 OpenAI 中转
 
 plbbl 是 `claudish` 类型 profile 的典型代表——它只有 OpenAI 协议(`/v1/chat/completions`),禁用了 Anthropic `/v1/messages`,必须经 claudish 做协议翻译。这一节以它为例,展示最复杂的一类后端怎么接。同类的 OpenAI 协议中转照搬即可。
@@ -109,6 +125,10 @@ model=oai@gpt-5.6-sol
 effort=xhigh
 provider=oai
 share_projects=yes
+statusline=yes
+# pool_usage_url=https://pool.example.com/api/codex/accounts
+# pool_keychain_service=pool.example.com statusline
+pool_cookie_name=chatgpt_code_access
 token=sk-xxx            # 或 token_cmd=op read 'op://Vault/plbbl/token'
 ```
 

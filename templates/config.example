@@ -19,6 +19,14 @@ config_dir=~/.claude-plbbl
 # 是否 symlink projects 到 ~/.claude/projects(yes=与官方 claude 共享 session+memory)
 share_projects=yes
 
+# 统一 statusline(Claude/Kimi/GLM;默认开启)
+statusline=yes
+
+# 可选:PLBBL 账号池周额度。公开模板不内置任何私有站点或口令。
+# pool_usage_url=https://pool.example.com/api/codex/accounts
+# pool_keychain_service=pool.example.com statusline
+pool_cookie_name=chatgpt_code_access
+
 # token 三选一,留空则按优先级自动找:env $CCGP_TOKEN > token= > token_cmd > cc-switch db
 # token=sk-xxxxxxxx
 # token_cmd=op read 'op://Vault/plbbl/token'

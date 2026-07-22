@@ -12,10 +12,10 @@
 
 **根因**:claudish 启动 Claude Code 时会同时注入两个占位变量(`ANTHROPIC_API_KEY` 防 API key 弹窗、`ANTHROPIC_AUTH_TOKEN` 防 login 界面),真实认证由 claudish 本地代理完成。新版 Claude Code 检测到双变量就警告。无害,但吵。
 
-**解法**:install 已自动 patch 全局 claudish(删掉 `ANTHROPIC_API_KEY` 占位行,只留 `ANTHROPIC_AUTH_TOKEN`——warning 文本认可的官方路径)。claudish 升级会还原,重跑:
+**解法**:认证占位符 patch 是显式 opt-in。重跑安装器时设置 `CCGP_PATCH_CLAUDISH=1`，或直接运行：
 
 ```
-bash ~/.local/share/claude-all/lib/patch-claudish.sh
+bash ~/.local/share/claude-all/lib/patch-claudish.sh --auth
 ```
 
 原文件备份在 claudish 包内 `dist/index.js.claude-all-bak`,要还原直接 `cp` 覆盖。
@@ -48,6 +48,18 @@ cp ~/.claude/backups/.claude.json.backup.<最大那个> ~/.claude/.claude.json
 - `claude` / `claudish` 没装 → install 时会检查并提示。
 - `~/.local/bin` 不在 PATH → install 会提示,按提示加。
 - token 没配好 → `cc-gpt-plbbl` 报「没解析到 token」,按提示配 `token=` 或 `token_cmd=`。
+
+## claudish 会话看不到统一 Statusline
+
+**根因**:claudish 升级覆盖了 npm 包内的兼容 patch，临时 `--settings` 又恢复为内置状态栏。
+
+**解法**:
+
+```
+bash ~/.local/share/claude-all/lib/patch-claudish.sh --statusline-only
+```
+
+然后重新启动会话。若是 direct/cmd profile，检查其 `$CLAUDE_CONFIG_DIR/settings.json` 的 `statusLine.command` 是否指向 `~/.local/share/claude-all/statusline/statusline.py`。
 
 ## claude-all 里选 claude 走的不是想要的源
 

@@ -11,6 +11,15 @@ c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
 info() { echo "$(c '1;36' '[claude-all]') $*"; }
 
 info "卸载..."
+if [ -f "$PREFIX/lib/statusline.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$PREFIX/lib/statusline.sh"
+  _statusline_command="$(_claude_all_statusline_command "$PREFIX")"
+  _claude_all_statusline_remove "$HOME/.claude-all" "$_statusline_command"
+  _claude_all_statusline_remove "$CFGDIR" "$_statusline_command"
+  _claude_all_statusline_remove "$HOME/.claude" "$_statusline_command"
+  [ -d "$HOME/.claude-glm" ] && _claude_all_statusline_remove "$HOME/.claude-glm" "$_statusline_command"
+fi
 rm -f "$BINDIR/claude-all" "$BINDIR/cc-gpt-plbbl" "$BINDIR/claude-plbbl"
 rm -rf "$PREFIX"
 
