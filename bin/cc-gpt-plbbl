@@ -40,6 +40,19 @@ esac
 export "${_ENV_PREFIX}_BASE_URL=$CCGP_BASE_URL"
 export "${_ENV_PREFIX}_API_KEY=$CCGP_TOKEN"
 
+# claudish 会生成临时 --settings;通过 claude-all patch 显式换成统一 statusline。
+_PREFIX="$(cd -P "$_LIB/.." >/dev/null 2>&1 && pwd)"
+_STATUSLINE="$_PREFIX/statusline/statusline.py"
+if [ "$CCGP_STATUSLINE" = yes ] && [ -f "$_STATUSLINE" ] && [ -f "$_LIB/statusline.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$_LIB/statusline.sh"
+  export CLAUDISH_STATUSLINE_COMMAND="$(_claude_all_statusline_command "$_PREFIX")"
+  export CLAUDISH_STATUSLINE_REFRESH=60
+  export CLAUDE_ALL_POOL_USAGE_URL="$CCGP_POOL_USAGE_URL"
+  export CLAUDE_ALL_POOL_KEYCHAIN_SERVICE="$CCGP_POOL_KEYCHAIN_SERVICE"
+  export CLAUDE_ALL_POOL_COOKIE_NAME="$CCGP_POOL_COOKIE_NAME"
+fi
+
 # 独立 config 目录:避开 ~/.claude 里 CC Switch 等写入的 ANTHROPIC_* 污染(否则 claudish 代理被覆盖 → 403)
 export CLAUDE_CONFIG_DIR="$CCGP_CONFIG_DIR"
 

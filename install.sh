@@ -2,7 +2,7 @@
 # claude-all 安装器(cc-gpt-plbbl 为兼容入口)。支持本地 clone 与 curl | bash。
 set -euo pipefail
 
-CCGP_VERSION="2.0.0"
+CCGP_VERSION="2.1.0"
 CCGP_REPO="${CCGP_REPO:-Valdemar-Yu/claude-all}"
 CCGP_REF="${CCGP_REF:-main}"
 
@@ -88,6 +88,7 @@ _relink_entry "$BINDIR/claude-all"
 # ---- 1. 依赖检查 ----
 command -v claude   >/dev/null 2>&1 || die "没找到 claude CLI。先安装 Claude Code。"
 command -v claudish >/dev/null 2>&1 || die "没找到 claudish。安装:npm i -g claudish@latest (要求 >=7.12)"
+command -v python3  >/dev/null 2>&1 || die "没找到 python3。统一 statusline 和 settings 合并需要 Python 3。"
 command -v sqlite3  >/dev/null 2>&1 || warn "没找到 sqlite3：无法从 CC Switch 自动读取 token，需配置 CCGP_TOKEN/token/token_cmd。"
 
 _claudish_version="$(claudish --version 2>/dev/null || true)"
@@ -100,10 +101,11 @@ else
   warn "无法识别 claudish 版本($_claudish_version)，继续安装；若启动失败先升级到 >=7.12。"
 fi
 
-# 对全局 npm 包的修改改为显式 opt-in。
-if [ "${CCGP_PATCH_CLAUDISH:-0}" = "1" ]; then
-  bash "$SELF_DIR/lib/patch-claudish.sh" || warn "claudish patch 失败；不影响请求，只可能保留 Both-set 警告。"
-fi
+# claudish 会强制生成临时 statusLine；默认 patch 使其接受 claude-all 的覆盖变量。
+_patch_args=(--statusline-only)
+[ "${CCGP_PATCH_CLAUDISH:-0}" = "1" ] && _patch_args=(--auth)
+bash "$SELF_DIR/lib/patch-claudish.sh" ${_patch_args[@]+"${_patch_args[@]}"} \
+  || warn "claudish patch 失败；direct profile 仍可用，claudish profile 会显示其内置状态栏。"
 
 # ---- 2. 读默认值 ----
 source "$SELF_DIR/lib/config.sh"
@@ -132,6 +134,7 @@ else
 fi
 case "$A_PROV" in oai|litellm) : ;; *) die "provider 只能是 oai 或 litellm" ;; esac
 case "$A_SHARE" in yes|no) : ;; *) die "share_projects 只能是 yes 或 no" ;; esac
+case "$CCGP_STATUSLINE" in yes|no) : ;; *) die "statusline 只能是 yes 或 no" ;; esac
 
 # ---- 3. 备份官方账户状态 ----
 if [ -f "$HOME/.claude/.claude.json" ]; then
@@ -163,9 +166,10 @@ fi
 # ---- 5. 安装 wrapper 与入口 ----
 mkdir -p "$PREFIX" "$BINDIR"
 chmod 700 "$PREFIX" 2>/dev/null || true
-rm -rf "$PREFIX/bin" "$PREFIX/lib"
-cp -R "$SELF_DIR/bin" "$SELF_DIR/lib" "$PREFIX/"
-chmod +x "$PREFIX/bin/cc-gpt-plbbl" "$PREFIX/bin/claude-all"
+rm -rf "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/statusline"
+cp -R "$SELF_DIR/bin" "$SELF_DIR/lib" "$SELF_DIR/statusline" "$PREFIX/"
+chmod +x "$PREFIX/bin/cc-gpt-plbbl" "$PREFIX/bin/claude-all" \
+  "$PREFIX/statusline/statusline.py" "$PREFIX/statusline/install.sh"
 
 _link_entry() {
   local name="$1" target="$2" dest="$BINDIR/$1" current
@@ -203,6 +207,27 @@ if [ -d "$HOME/.claude/projects" ]; then
   ln -sfn "$HOME/.claude/projects" "$ALLDIR/projects"
 fi
 
+# ---- 6.1 统一 statusline ----
+# shellcheck source=/dev/null
+source "$PREFIX/lib/statusline.sh"
+_statusline_command="$(_claude_all_statusline_command "$PREFIX")"
+if [ "$CCGP_STATUSLINE" = yes ]; then
+  _claude_all_statusline_install "$CFGDIR" "$_statusline_command"
+  _claude_all_statusline_install "$ALLDIR" "$_statusline_command"
+  if [ "${CCGP_STATUSLINE_GLOBAL:-0}" = "1" ]; then
+    _claude_all_statusline_install "$HOME/.claude" "$_statusline_command"
+    [ -d "$HOME/.claude-glm" ] && _claude_all_statusline_install "$HOME/.claude-glm" "$_statusline_command"
+  fi
+  info "statusline:$PREFIX/statusline/statusline.py (60s 刷新)"
+else
+  _claude_all_statusline_remove "$CFGDIR" "$_statusline_command"
+  _claude_all_statusline_remove "$ALLDIR" "$_statusline_command"
+  if [ "${CCGP_STATUSLINE_GLOBAL:-0}" = "1" ]; then
+    _claude_all_statusline_remove "$HOME/.claude" "$_statusline_command"
+    [ -d "$HOME/.claude-glm" ] && _claude_all_statusline_remove "$HOME/.claude-glm" "$_statusline_command"
+  fi
+fi
+
 _mk_builtin() {
   local name="$1" cmd="$2" label="$3"
   [ -f "$ALLDIR/profiles/$name.env" ] && return 0
@@ -219,13 +244,23 @@ _claude_cmd="$(command -v claude)"
 _mk_builtin claude "$_claude_cmd" "Claude / CC Switch 当前源"
 command -v claude-glm  >/dev/null 2>&1 && _mk_builtin claude-glm  "$(command -v claude-glm)"  "GLM (z.ai)"
 command -v claude-fugu >/dev/null 2>&1 && _mk_builtin claude-fugu "$(command -v claude-fugu)" "Sakana Fugu (claudish)"
-if command -v claude-plbbl >/dev/null 2>&1; then
-  _plbbl_cmd="$(command -v claude-plbbl)"
-else
-  _plbbl_cmd="$BINDIR/cc-gpt-plbbl"
-fi
+_plbbl_cmd="$BINDIR/cc-gpt-plbbl"
 _mk_builtin claude-plbbl "$_plbbl_cmd" "plbbl GPT (claudish)"
-info "多环境配置:${ALLDIR}；已有 profiles 不覆盖"
+# 2.0 生成的内置 profile 可能仍指向安装前的旧 claude-plbbl wrapper；只迁移带内置标记的文件。
+_plbbl_profile="$ALLDIR/profiles/claude-plbbl.env"
+if [ -f "$_plbbl_profile" ] && grep -q 'claude-all 内置 profile' "$_plbbl_profile"; then
+  PROFILE="$_plbbl_profile" COMMAND="$_plbbl_cmd" python3 - <<'PY'
+import os, re, shlex
+path = os.environ["PROFILE"]
+text = open(path).read()
+line = "CLAUDE_ALL_CMD=" + shlex.quote(os.environ["COMMAND"])
+text, count = re.subn(r"^CLAUDE_ALL_CMD=.*$", line, text, count=1, flags=re.M)
+if count:
+    open(path, "w").write(text)
+PY
+  chmod 600 "$_plbbl_profile"
+fi
+info "多环境配置:${ALLDIR}；用户自建 profiles 不覆盖"
 
 # ---- 7. 写单环境配置，保留已有 token/token_cmd ----
 mkdir -p "$(dirname "$CONFIG_FILE")"
@@ -238,6 +273,10 @@ chmod 700 "$(dirname "$CONFIG_FILE")" 2>/dev/null || true
   printf 'provider=%s\n' "$A_PROV"
   printf 'config_dir=%s\n' "$CFGDIR"
   printf 'share_projects=%s\n' "$A_SHARE"
+  printf 'statusline=%s\n' "$CCGP_STATUSLINE"
+  if [ -n "$CCGP_POOL_USAGE_URL" ]; then printf 'pool_usage_url=%s\n' "$CCGP_POOL_USAGE_URL"; else printf '# pool_usage_url=\n'; fi
+  if [ -n "$CCGP_POOL_KEYCHAIN_SERVICE" ]; then printf 'pool_keychain_service=%s\n' "$CCGP_POOL_KEYCHAIN_SERVICE"; else printf '# pool_keychain_service=\n'; fi
+  printf 'pool_cookie_name=%s\n' "$CCGP_POOL_COOKIE_NAME"
   if [ -n "${ccgp_cfg_token:-}" ]; then printf 'token=%s\n' "$ccgp_cfg_token"; else printf '# token=\n'; fi
   if [ -n "${ccgp_cfg_token_cmd:-}" ]; then printf 'token_cmd=%s\n' "$ccgp_cfg_token_cmd"; else printf "# token_cmd=op read 'op://Vault/plbbl/token'\n"; fi
 } > "$CONFIG_FILE"
@@ -247,7 +286,9 @@ info "单环境参数:$CONFIG_FILE"
 # ---- 8. 可用凭据时 probe ----
 source "$SELF_DIR/lib/token.sh"
 CCGP_BASE_URL="$A_BASE"
-if _ccgp_resolve_token 2>/dev/null && [ -n "${CCGP_TOKEN:-}" ]; then
+if [ "${CCGP_SKIP_PROBE:-0}" = "1" ]; then
+  info "按 CCGP_SKIP_PROBE=1 跳过模型 probe"
+elif _ccgp_resolve_token 2>/dev/null && [ -n "${CCGP_TOKEN:-}" ]; then
   case "$A_PROV" in oai) PENV="OPENAI" ;; *) PENV="LITELLM" ;; esac
   info "probe $A_MODEL ..."
   if env "${PENV}_BASE_URL=$A_BASE" "${PENV}_API_KEY=$CCGP_TOKEN" \

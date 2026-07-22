@@ -14,6 +14,21 @@
 #   CLAUDE_ALL_DRY_RUN=1        不 exec,只打印将要设置的 env 和命令(测试用)
 set -euo pipefail
 
+_SOURCE="${BASH_SOURCE[0]:-$0}"
+while [ -L "$_SOURCE" ]; do
+  _DIR="$(cd -P "$(dirname "$_SOURCE")" >/dev/null 2>&1 && pwd)"
+  _SOURCE="$(readlink "$_SOURCE")"
+  case "$_SOURCE" in /*) : ;; *) _SOURCE="$_DIR/$_SOURCE" ;; esac
+done
+_SELF_DIR="$(cd -P "$(dirname "$_SOURCE")" >/dev/null 2>&1 && pwd)"
+_PREFIX="$(cd -P "$_SELF_DIR/.." >/dev/null 2>&1 && pwd)"
+_STATUSLINE_COMMAND=""
+if [ -f "$_PREFIX/lib/statusline.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$_PREFIX/lib/statusline.sh"
+  _STATUSLINE_COMMAND="$(_claude_all_statusline_command "$_PREFIX")"
+fi
+
 PROFILES_DIR="${CLAUDE_ALL_PROFILES_DIR:-$HOME/.claude-all/profiles}"
 ADD_MARK="__add__"
 
@@ -47,15 +62,22 @@ launch() {
   local profile="$1"; shift
   # 清掉可能干扰的残留变量(profile 里的值随后 source 进来)
   local _residual _v
-  _residual=$(env | grep -oE '^(ANTHROPIC|CLAUDE_CODE|OPENAI|LITELLM)_[A-Z0-9_]+' | cut -d= -f1 || true)
+  _residual=$(env | grep -oE '^(ANTHROPIC|CLAUDE_CODE|OPENAI|LITELLM|CLAUDISH|CLAUDE_ALL_POOL)_[A-Z0-9_]+' | cut -d= -f1 || true)
   for _v in $_residual; do unset "$_v" 2>/dev/null || true; done
-  unset CLAUDE_CONFIG_DIR 2>/dev/null || true
+  unset CLAUDE_CONFIG_DIR CLAUDE_ALL_LAUNCH CLAUDE_ALL_CMD CLAUDE_ALL_LABEL \
+    CLAUDE_ALL_MODEL CLAUDE_ALL_EFFORT CLAUDE_ALL_STATUSLINE 2>/dev/null || true
 
   set -a
   # shellcheck disable=SC1090
   source "$PROFILES_DIR/$profile.env"
   set +a
   : "${CLAUDE_ALL_LAUNCH:=direct}"
+  : "${CLAUDE_ALL_STATUSLINE:=${CCGP_STATUSLINE:-yes}}"
+  if [ "$CLAUDE_ALL_LAUNCH" = claudish ] && [ "$CLAUDE_ALL_STATUSLINE" = yes ] \
+      && [ -n "$_STATUSLINE_COMMAND" ]; then
+    export CLAUDISH_STATUSLINE_COMMAND="$_STATUSLINE_COMMAND"
+    export CLAUDISH_STATUSLINE_REFRESH=60
+  fi
 
   if [ "${CLAUDE_ALL_DRY_RUN:-0}" = "1" ]; then
     echo "[dry-run] profile=$profile launch=$CLAUDE_ALL_LAUNCH"
