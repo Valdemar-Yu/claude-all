@@ -2,7 +2,7 @@
 # claude-all 安装器(cc-gpt-plbbl 为兼容入口)。支持本地 clone 与 curl | bash。
 set -euo pipefail
 
-CCGP_VERSION="2.1.0"
+CCGP_VERSION="3.0.0"
 CCGP_REPO="${CCGP_REPO:-Valdemar-Yu/claude-all}"
 CCGP_REF="${CCGP_REF:-main}"
 
@@ -89,6 +89,8 @@ _relink_entry "$BINDIR/claude-all"
 command -v claude   >/dev/null 2>&1 || die "没找到 claude CLI。先安装 Claude Code。"
 command -v claudish >/dev/null 2>&1 || die "没找到 claudish。安装:npm i -g claudish@latest (要求 >=7.12)"
 command -v python3  >/dev/null 2>&1 || die "没找到 python3。统一 statusline 和 settings 合并需要 Python 3。"
+command -v python3  >/dev/null 2>&1 || die "没找到 python3。模型列表解析和安全配置写入需要 python3。"
+command -v curl     >/dev/null 2>&1 || die "没找到 curl。模型列表发现需要 curl。"
 command -v sqlite3  >/dev/null 2>&1 || warn "没找到 sqlite3：无法从 CC Switch 自动读取 token，需配置 CCGP_TOKEN/token/token_cmd。"
 
 _claudish_version="$(claudish --version 2>/dev/null || true)"

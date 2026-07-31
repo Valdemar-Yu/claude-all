@@ -148,6 +148,30 @@ def fmt_countdown(resets_at):
     return f"{m}m"
 
 # ---- context: prefer official fields, fall back to the transcript ----
+def context_from_claudish():
+    """Read claudish's real context metrics when Claude receives placeholder usage."""
+    try:
+        proxy = urllib.parse.urlparse(os.environ.get("ANTHROPIC_BASE_URL", ""))
+        if proxy.hostname not in ("127.0.0.1", "localhost", "::1") or not proxy.port:
+            return None
+        state_dir = os.path.expanduser(
+            os.environ.get("CLAUDISH_STATE_DIR", "~/.claudish"))
+        with open(os.path.join(state_dir, f"tokens-{proxy.port}.json")) as f:
+            metrics = json.load(f)
+        size = int(metrics["context_window"])
+        left = float(metrics["context_left_percent"])
+        if size <= 0 or not math.isfinite(left) or not 0 <= left <= 100:
+            return None
+        used_pct = 100.0 - left
+        input_tokens = metrics.get("input_tokens")
+        used_tokens = (int(input_tokens)
+                       if isinstance(input_tokens, int) and input_tokens >= 0
+                       else int(round(size * used_pct / 100.0)))
+        return used_pct, size, used_tokens
+    except Exception:
+        return None
+
+
 def context_from_official(data):
     cw = data.get("context_window") or {}
     used_pct = cw.get("used_percentage")
@@ -274,7 +298,7 @@ _GECODE_LOCK = _GECODE_CACHE + ".lock"
 _GECODE_CACHE_TTL = 60
 _GECODE_CACHE_KEYS = {
     "base_url", "fetched_at", "remaining_percent", "known_accounts", "total_accounts",
-    "resets_at",
+    "resets_at", "source_stale",
 }
 
 
@@ -292,6 +316,7 @@ def _read_gecode_cache(base):
         known = cached["known_accounts"]
         total = cached["total_accounts"]
         resets_at = cached["resets_at"]
+        source_stale = cached["source_stale"]
         if (isinstance(fetched, bool) or not isinstance(fetched, (int, float))
                 or not math.isfinite(float(fetched))):
             return None
@@ -306,6 +331,8 @@ def _read_gecode_cache(base):
                 or not isinstance(resets_at, (int, float))
                 or not math.isfinite(float(resets_at))):
             return None
+        if not isinstance(source_stale, bool):
+            return None
         return {
             "base_url": base,
             "fetched_at": float(fetched),
@@ -313,6 +340,7 @@ def _read_gecode_cache(base):
             "known_accounts": known,
             "total_accounts": total,
             "resets_at": float(resets_at) if resets_at is not None else None,
+            "source_stale": source_stale,
         }
     except Exception:
         return None
@@ -330,11 +358,11 @@ def aggregate_pool_usage(items, now=None):
         raise ValueError("pool items must be a list")
     remaining = []
     reset_times = []
+    source_stale = False
     for item in items:
         if not isinstance(item, dict):
             continue
-        if (item.get("reauth_required") or item.get("error")
-                or item.get("usage_status") == "unavailable"):
+        if item.get("reauth_required") or item.get("usage_status") == "unavailable":
             continue
         usage = item.get("usage")
         if not isinstance(usage, dict):
@@ -344,6 +372,8 @@ def aggregate_pool_usage(items, now=None):
                 or not math.isfinite(float(used))):
             continue
         remaining.append(max(0.0, min(100.0, 100.0 - float(used))))
+        if item.get("error") or item.get("usage_error"):
+            source_stale = True
         reset_at = usage.get("resets_at")
         if (not isinstance(reset_at, bool) and isinstance(reset_at, (int, float))
                 and math.isfinite(float(reset_at)) and float(reset_at) > now):
@@ -353,6 +383,7 @@ def aggregate_pool_usage(items, now=None):
         "known_accounts": len(remaining),
         "total_accounts": len(items),
         "resets_at": min(reset_times) if reset_times else None,
+        "source_stale": source_stale,
     }
 
 
@@ -444,7 +475,7 @@ def fmt_gecode_pool(quota):
     total = int(quota["total_accounts"])
     partial = known < total
     color = "33" if partial else pct_color(remaining)
-    prefix = "~" if quota.get("stale") else ""
+    prefix = "~" if quota.get("stale") or quota.get("source_stale") else ""
     amount = "--" if not known else f"{prefix}{remaining:.0f}%"
     text = f"📅 周余 {amount}"
     countdown = fmt_countdown(quota.get("resets_at")) if quota.get("resets_at") else ""
@@ -537,7 +568,9 @@ def main():
     data = read_input()
 
     # ---- model + effort ----
-    ctx = context_from_official(data) or context_from_transcript(data)
+    ctx = (context_from_claudish()
+           or context_from_official(data)
+           or context_from_transcript(data))
     model_seg = c(f"🤖 {fmt_model(data, ctx)}", "1;36")
     effort = (data.get("effort") or {}).get("level")
     if effort:
