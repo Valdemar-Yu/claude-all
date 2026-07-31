@@ -49,6 +49,18 @@ cp ~/.claude/backups/.claude.json.backup.<最大那个> ~/.claude/.claude.json
 - `~/.local/bin` 不在 PATH → install 会提示,按提示加。
 - token 没配好 → `cc-gpt-plbbl` 报「没解析到 token」,按提示配 `token=` 或 `token_cmd=`。
 
+## 配了不同 subagent/team 模型，实际仍都走主模型
+
+**根因**:旧 profile 给 claudish 传单一 `--model`，它会成为所有请求的 explicit primary；或者手动使用了 claudish 7.12.1 尚未接入实际路由的 `--model-subagent`。
+
+**解法**:重跑 `claude-all add` 生成 schema 2 profile。dry-run 应显示 `--model-opus`、`--model-sonnet`、`--model-haiku` 三条映射，且不应出现单一 `claudish --model <主模型>`。
+
+## add 读不到模型列表
+
+**根因**:中转没实现标准 `/v1/models`，base URL 路径不匹配，或 token 无权访问 Models API。Models API 可用也不代表返回的每个模型都能推理。
+
+**解法**:向导会保留具体 HTTP/JSON 原因并自动进入手动模型 ID 输入。手动值以服务方文档和一次真实请求为准；不要因为模型出现在列表里就视为已验证。
+
 ## claudish 会话看不到统一 Statusline
 
 **根因**:claudish 升级覆盖了 npm 包内的兼容 patch，临时 `--settings` 又恢复为内置状态栏。

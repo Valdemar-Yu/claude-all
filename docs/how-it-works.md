@@ -29,6 +29,20 @@ claudish 的 `litellm` provider 是通用兼容层,工具调用(tool_use)翻译�
 ### token 从哪来
 优先级:env `$CCGP_TOKEN` > 配置文件 `token=` > `token_cmd=` 外部命令(op/pass)> CC Switch db 按 base_url 匹配。推荐 `token_cmd` 接密码管理器,token 不落盘。
 
+### 三种模型角色如何路由
+
+`claude-all add` 保存主模型、subagent、Agent Team teammate 三个默认值。Claude Code 侧分别请求 `opus`、`sonnet`、`haiku`：
+
+- Anthropic 直连把三个 alias 映射到服务端实际 model ID；
+- OpenAI 中转把三个请求交给 claudish 的 `model-opus`、`model-sonnet`、`model-haiku`；
+- profile 通过本次 `--settings` 设置 `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` 和 `teammateDefaultModel=haiku`，不修改用户全局 settings。
+
+不能把 claudish 的单一 `--model` 当作主模型默认值：explicit primary 会覆盖角色判断，让主会话、subagent 和 teammate 全部落到同一后端。claudish 7.12.1 的 `model-subagent` 参数也没有接入实际请求路由，所以新版不使用它。
+
+### Models API 与密钥
+
+向导从 `<base>/v1/models`（base 已以 `/v1` 结尾时用 `<base>/models`）读取 `data[].id`，Anthropic 列表支持 `after_id` 分页。API key 通过 curl stdin header 传递，不进入进程 argv、日志或临时文件。列表调用失败不会阻塞配置，改为手动输入 model ID。
+
 ### Statusline 如何跨三种 launch 生效
 
 `direct` profile 从对应 `$CLAUDE_CONFIG_DIR/settings.json` 读取统一脚本。`cmd` profile 由外部 wrapper 自己的 config 目录读取；安装时可用 `CCGP_STATUSLINE_GLOBAL=1` 同时配置 `~/.claude` 和 `~/.claude-glm`。`claudish` 会生成临时 `--settings` 并覆盖用户 statusLine，所以 claude-all 给 claudish 加一个幂等 patch，使 `CLAUDISH_STATUSLINE_COMMAND` 和 `CLAUDISH_STATUSLINE_REFRESH` 能替换它的内置命令。

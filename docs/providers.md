@@ -19,6 +19,10 @@ effort 档位:`none / minimal / low / medium / high / xhigh / max`,经 `--effort
 
 ### 配置
 
+运行 `claude-all add`，选择 `openai`，输入 group base URL 和 token。向导从 `https://plbbl.com/t/<group>/v1/models` 读取候选模型，并分别配置主模型、subagent 和 Agent Team teammate。profile 中的实际模型 ID 不需要手写 `oai@` 前缀，启动时由 `CLAUDE_ALL_PROVIDER=oai` 统一补齐。
+
+旧的 `~/.config/claude-all/config` 单实例仍使用：
+
 ```
 base_url=https://plbbl.com/t/<你的-group>
 model=oai@gpt-5.6-sol
@@ -36,10 +40,6 @@ provider=oai
 
 ## 你的中转没列上面?
 
-按 `templates/config.example` 配 base_url/token/model,跑 install 自检。模型名用中转的 `/v1/models` 查:
-
-```
-curl <base_url>/v1/models -H "Authorization: Bearer <token>"
-```
+先运行 `claude-all add`。若服务端实现标准 `/v1/models`，向导直接显示模型多选；若返回 404、认证失败、非法 JSON 或空列表，向导会显示原因并进入手动输入。模型列表不是推理 probe：中转可能列出账户实际无权调用的模型，首次使用仍以真实请求结果为准。
 
 欢迎提 PR 补充实测结果。

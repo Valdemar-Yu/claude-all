@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
 # claude-all — 多 API 环境选择启动器。
-# 裸运行弹方向键菜单,聚合现有启动命令(claude / claude-glm / claude-plbbl / claude-fugu)
-# 与 ~/.claude-all/profiles/*.env 里自加的 API;选中后进入对应 Claude Code 环境。
-# 菜单交互思路借鉴 https://github.com/WaldronZ/scripts 的 claude-code/claude_model_menu.sh。
-#
-# 用法:
-#   claude-all                  菜单(最后一项 [+ Add new API] 进入添加向导)
-#   claude-all list             列出全部 profile
-#   claude-all add              添加向导(同菜单 Add 项)
-#   claude-all <name> [args..]  跳过菜单直接启动,args 透传
-# 环境变量:
-#   CLAUDE_ALL_PROFILES_DIR     profile 目录(默认 ~/.claude-all/profiles)
-#   CLAUDE_ALL_DRY_RUN=1        不 exec,只打印将要设置的 env 和命令(测试用)
+# 裸运行弹方向键菜单；add 会发现 Models API、保存候选模型并配置主模型/subagent/Agent Team 默认路由。
 set -euo pipefail
 
 _SOURCE="${BASH_SOURCE[0]:-$0}"
@@ -22,199 +11,91 @@ while [ -L "$_SOURCE" ]; do
 done
 _SELF_DIR="$(cd -P "$(dirname "$_SOURCE")" >/dev/null 2>&1 && pwd)"
 _PREFIX="$(cd -P "$_SELF_DIR/.." >/dev/null 2>&1 && pwd)"
+_STATUSLINE="$_PREFIX/statusline/statusline.py"
 _STATUSLINE_COMMAND=""
 if [ -f "$_PREFIX/lib/statusline.sh" ]; then
   # shellcheck source=/dev/null
   source "$_PREFIX/lib/statusline.sh"
   _STATUSLINE_COMMAND="$(_claude_all_statusline_command "$_PREFIX")"
 fi
+_MODEL_CATALOG="$_PREFIX/lib/model-catalog.sh"
 
 PROFILES_DIR="${CLAUDE_ALL_PROFILES_DIR:-$HOME/.claude-all/profiles}"
-ADD_MARK="__add__"
 
 c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
-info()  { echo "$(c '1;36' '[claude-all]') $*"; }
-die()   { echo "$(c '1;31' '[claude-all]') $*" >&2; exit 1; }
+info() { echo "$(c '1;36' '[claude-all]') $*"; }
+warn() { echo "$(c '1;33' '[claude-all]') $*" >&2; }
+die()  { echo "$(c '1;31' '[claude-all]') $*" >&2; exit 1; }
 
-# ---- profiles 扫描 ----
-profiles=()
-while IFS= read -r f; do
-  [ -n "$f" ] && profiles+=("$(basename "$f" .env)")
-done < <(find "$PROFILES_DIR" -maxdepth 1 -name '*.env' 2>/dev/null | sort)
-
-# 读 profile 字段(grep 取值,不 source,避免污染环境)
-_field() { grep -E "^$2=" "$PROFILES_DIR/$1.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true; }
-
-label_of() {
-  local p="$1" lbl launch model
-  lbl="$(_field "$p" CLAUDE_ALL_LABEL)"
-  [ -n "$lbl" ] && { printf '%s (%s)' "$p" "$lbl"; return; }
-  launch="$(_field "$p" CLAUDE_ALL_LAUNCH)"
-  case "$launch" in
-    cmd) printf '%s (%s)' "$p" "$(_field "$p" CLAUDE_ALL_CMD)" ;;
-    *)   model="$(_field "$p" ANTHROPIC_MODEL)"; model="${model:-$(_field "$p" CLAUDE_ALL_MODEL)}"
-         [ -n "$model" ] && printf '%s (%s)' "$p" "$model" || printf '%s' "$p" ;;
-  esac
+_has_arg() {
+  local wanted="$1" arg
+  shift
+  for arg in "$@"; do
+    [ "$arg" = "$wanted" ] && return 0
+    case "$arg" in "$wanted"=*) return 0 ;; esac
+  done
+  return 1
 }
 
-# ---- launch ----
-launch() {
-  local profile="$1"; shift
-  # 清掉可能干扰的残留变量(profile 里的值随后 source 进来)
-  local _residual _v
-  _residual=$(env | grep -oE '^(ANTHROPIC|CLAUDE_CODE|OPENAI|LITELLM|CLAUDISH|CLAUDE_ALL_POOL)_[A-Z0-9_]+' | cut -d= -f1 || true)
-  for _v in $_residual; do unset "$_v" 2>/dev/null || true; done
-  unset CLAUDE_CONFIG_DIR CLAUDE_ALL_LAUNCH CLAUDE_ALL_CMD CLAUDE_ALL_LABEL \
-    CLAUDE_ALL_MODEL CLAUDE_ALL_EFFORT CLAUDE_ALL_STATUSLINE 2>/dev/null || true
+_menu_height() {
+  local rows
+  rows="$(tput lines 2>/dev/null || printf '24')"
+  case "$rows" in ''|*[!0-9]*) rows=24 ;; esac
+  rows=$(( rows - 7 ))
+  [ "$rows" -lt 5 ] && rows=5
+  [ "$rows" -gt 20 ] && rows=20
+  printf '%s' "$rows"
+}
 
-  set -a
-  # shellcheck disable=SC1090
-  source "$PROFILES_DIR/$profile.env"
-  set +a
-  : "${CLAUDE_ALL_LAUNCH:=direct}"
-  : "${CLAUDE_ALL_STATUSLINE:=${CCGP_STATUSLINE:-yes}}"
-  if [ "$CLAUDE_ALL_LAUNCH" = claudish ] && [ "$CLAUDE_ALL_STATUSLINE" = yes ] \
-      && [ -n "$_STATUSLINE_COMMAND" ]; then
-    export CLAUDISH_STATUSLINE_COMMAND="$_STATUSLINE_COMMAND"
-    export CLAUDISH_STATUSLINE_REFRESH=60
-  fi
+_select_one() {
+  local title="$1" default_idx="$2" prompt_non_tty="$3"
+  shift 3
+  local items=("$@") total="${#items[@]}" selected="$default_idx"
+  local visible top=0 rendered=0 menu_lines key rest index end input
 
-  if [ "${CLAUDE_ALL_DRY_RUN:-0}" = "1" ]; then
-    echo "[dry-run] profile=$profile launch=$CLAUDE_ALL_LAUNCH"
-    env | grep -E '^(ANTHROPIC|OPENAI|LITELLM|CLAUDE)_' | sort | sed -E 's/((KEY|TOKEN)=)(.{8}).*/\1\3.../' || true
-    case "$CLAUDE_ALL_LAUNCH" in
-      cmd)      echo "[dry-run] would exec: $CLAUDE_ALL_CMD $*" ;;
-      direct)   echo "[dry-run] would exec: claude $*  (CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude-all})" ;;
-      claudish) echo "[dry-run] would exec: claudish --model ${CLAUDE_ALL_MODEL:-?} $*  (CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude-all})" ;;
-    esac
+  [ "$total" -gt 0 ] || return 1
+  [ "$selected" -ge 0 ] 2>/dev/null && [ "$selected" -lt "$total" ] 2>/dev/null || selected=0
+
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    if [ "$prompt_non_tty" != yes ]; then
+      SELECTED_INDEX="$selected"
+      return 0
+    fi
+    printf '%s\n' "$title" >&2
+    for (( index=0; index<total; index++ )); do
+      printf '  %d) %s%s\n' "$(( index + 1 ))" "${items[$index]}" "$([ "$index" -eq "$selected" ] && printf ' [默认]' || true)" >&2
+    done
+    printf '选择 [%d]: ' "$(( selected + 1 ))" >&2
+    read -r input
+    input="${input:-$(( selected + 1 ))}"
+    case "$input" in *[!0-9]*|'') return 1 ;; esac
+    [ "$input" -ge 1 ] 2>/dev/null && [ "$input" -le "$total" ] 2>/dev/null || return 1
+    SELECTED_INDEX=$(( input - 1 ))
     return 0
   fi
 
-  info "启动:$(label_of "$profile")"
-  case "$CLAUDE_ALL_LAUNCH" in
-    cmd)
-      [ -n "${CLAUDE_ALL_CMD:-}" ] || die "profile '$profile' 缺 CLAUDE_ALL_CMD"
-      exec "$CLAUDE_ALL_CMD" "$@" ;;
-    direct)
-      export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
-      exec claude "$@" ;;
-    claudish)
-      export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
-      [ -n "${CLAUDE_ALL_MODEL:-}" ] || die "profile '$profile' 缺 CLAUDE_ALL_MODEL"
-      local _e=(); [ -n "${CLAUDE_ALL_EFFORT:-}" ] && _e=(--effort "$CLAUDE_ALL_EFFORT")
-      exec claudish --model "$CLAUDE_ALL_MODEL" ${_e[@]+"${_e[@]}"} "$@" ;;
-    *) die "profile '$profile' 未知 CLAUDE_ALL_LAUNCH='$CLAUDE_ALL_LAUNCH'(cmd/direct/claudish)" ;;
-  esac
-}
-
-# ---- Add 向导 ----
-add_wizard() {
-  mkdir -p "$PROFILES_DIR"; chmod 700 "$PROFILES_DIR" 2>/dev/null || true
-  local name proto base key model small go ow
-  printf 'API 名称(小写字母/数字/连字符): ' >&2; read -r name
-  case "$name" in
-    ''|*[!a-z0-9-]*) die "名称不合法(只能小写字母/数字/连字符)" ;;
-  esac
-  if [ -f "$PROFILES_DIR/$name.env" ]; then
-    printf "'%s' 已存在,覆盖? y/N: " "$name" >&2; read -r ow
-    [ "$ow" = y ] || { info "取消"; exit 0; }
-  fi
-  printf '协议 anthropic/openai [anthropic]: ' >&2; read -r proto
-  proto="${proto:-anthropic}"
-  case "$proto" in anthropic|openai) : ;; *) die "协议只能是 anthropic 或 openai" ;; esac
-  printf 'base_url: ' >&2; read -r base
-  [ -n "$base" ] || die "base_url 不能为空"
-  printf 'api_key(输入不回显): ' >&2; read -rs key; printf '\n' >&2
-  [ -n "$key" ] || die "api_key 不能为空"
-  printf 'model: ' >&2; read -r model
-  [ -n "$model" ] || die "model 不能为空"
-
-  umask 077
-  if [ "$proto" = anthropic ]; then
-    printf '小模型(Haiku/子代理槽位,回车同 model): ' >&2; read -r small
-    small="${small:-$model}"
-    cat > "$PROFILES_DIR/$name.env" <<EOF
-# $name — claude-all profile(add 向导生成)
-# Anthropic 兼容 API(支持 /v1/messages),直连。
-CLAUDE_ALL_LAUNCH=direct
-ANTHROPIC_BASE_URL="$base"
-ANTHROPIC_AUTH_TOKEN="$key"
-ANTHROPIC_MODEL="$model"
-ANTHROPIC_DEFAULT_OPUS_MODEL="$model"
-ANTHROPIC_DEFAULT_SONNET_MODEL="$model"
-ANTHROPIC_DEFAULT_FABLE_MODEL="$model"
-ANTHROPIC_DEFAULT_HAIKU_MODEL="$small"
-CLAUDE_CODE_SUBAGENT_MODEL="$small"
-EOF
-  else
-    # claudish 的 oai provider 要求 oai@ 前缀;用户已带前缀则不重复加
-    local cmodel
-    case "$model" in *@*) cmodel="$model" ;; *) cmodel="oai@$model" ;; esac
-    cat > "$PROFILES_DIR/$name.env" <<EOF
-# $name — claude-all profile(add 向导生成)
-# OpenAI 协议 API(/v1/chat/completions),经 claudish 翻译。可加 CLAUDE_ALL_EFFORT=high 等。
-CLAUDE_ALL_LAUNCH=claudish
-OPENAI_BASE_URL="$base"
-OPENAI_API_KEY="$key"
-CLAUDE_ALL_MODEL="$cmodel"
-EOF
-  fi
-  chmod 600 "$PROFILES_DIR/$name.env"
-  info "已保存:$PROFILES_DIR/$name.env (600)"
-  printf '现在启动吗? y/N: ' >&2; read -r go
-  if [ "$go" = y ]; then launch "$name"; else info "重跑 claude-all 即可在菜单看到 '$name'"; fi
-}
-
-# ---- 菜单 ----
-choose_menu() {
-  local total=$(( ${#profiles[@]} + 1 ))   # +1 个 Add 项
-  local add_idx=$(( total - 1 ))
-  local selected=0 rendered=0
-  local menu_lines=$(( total + 3 ))
-  local key rest index label mark prefix input
-
-  item_label() {
-    if [ "$1" -eq "$add_idx" ]; then printf '[+ Add new API]'; else label_of "${profiles[$1]}"; fi
-  }
-
-  render_menu() {
-    if [ "$rendered" -eq 1 ]; then printf "\033[%dA\033[J" "$menu_lines"; fi
+  visible="$(_menu_height)"; [ "$visible" -gt "$total" ] && visible="$total"
+  menu_lines=$(( visible + 4 ))
+  _render_select_one() {
+    [ "$rendered" -eq 1 ] && printf '\033[%dA\033[J' "$menu_lines" >&2
     rendered=1
-    printf "claude-all — 选择环境:\n"
-    for (( index=0; index<total; index++ )); do
-      label="$(item_label "$index")"
-      mark="[ ]"; [ "$selected" -eq "$index" ] && mark="[✓]"
-      prefix=" "; [ "$selected" -eq "$index" ] && prefix=">"
+    [ "$selected" -lt "$top" ] && top="$selected"
+    [ "$selected" -ge $(( top + visible )) ] && top=$(( selected - visible + 1 ))
+    end=$(( top + visible )); [ "$end" -gt "$total" ] && end="$total"
+    printf '%s (%d/%d):\n' "$title" "$(( selected + 1 ))" "$total" >&2
+    for (( index=top; index<end; index++ )); do
       if [ "$selected" -eq "$index" ]; then
-        printf "%s %s \033[7m%s\033[0m\n" "$prefix" "$mark" "$label"
+        printf '> \033[7m%s\033[0m\n' "${items[$index]}" >&2
       else
-        printf "%s %s %s\n" "$prefix" "$mark" "$label"
+        printf '  %s\n' "${items[$index]}" >&2
       fi
     done
-    printf "\n↑/↓ 移动,Enter/Space 确认,q 退出\n"
+    printf '\n↑/↓ 移动，Enter 确认，q 取消\n' >&2
   }
 
-  # 非 tty:数字选择回退
-  if [ ! -t 0 ] || [ ! -t 1 ]; then
-    echo "claude-all — 选择环境:"
-    for (( index=0; index<total; index++ )); do
-      printf "  %d) %s\n" "$(( index + 1 ))" "$(item_label "$index")"
-    done
-    read -r -p "选择 [1]: " input
-    input="${input:-1}"
-    case "$input" in
-      q|Q) echo "取消"; exit 0 ;;
-      *[!0-9]*) die "无效选择:$input" ;;
-    esac
-    if [ "$input" -lt 1 ] || [ "$input" -gt "$total" ]; then die "无效选择:$input"; fi
-    [ "$input" -eq "$total" ] && return 2   # Add 项
-    SELECTED_PROFILE="${profiles[$(( input - 1 ))]}"
-    return 0
-  fi
-
-  trap 'printf "\033[?25h"; exit 130' INT TERM
-  printf "\033[?25l"
-  render_menu
+  trap 'printf "\033[?25h" >&2; exit 130' INT TERM
+  printf '\033[?25l' >&2
+  _render_select_one
   while true; do
     IFS= read -rsn1 key
     case "$key" in
@@ -224,46 +105,487 @@ choose_menu() {
           "[A"|"OA"|"[D"|"OD") selected=$(( (selected + total - 1) % total )) ;;
           "[B"|"OB"|"[C"|"OC") selected=$(( (selected + 1) % total )) ;;
         esac ;;
-      " "|"") break ;;
-      q|Q) printf "\033[?25h\n取消\n"; exit 0 ;;
+      "") break ;;
+      q|Q) printf '\033[?25h\n' >&2; trap - INT TERM; return 1 ;;
     esac
-    render_menu
+    _render_select_one
   done
-  printf "\033[?25h\n"
+  printf '\033[?25h\n' >&2
   trap - INT TERM
+  SELECTED_INDEX="$selected"
+}
 
+_parse_index_selection() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+text, total_text = sys.argv[1:3]
+total = int(total_text)
+if text.strip().lower() in {"a", "all", "*"}:
+    print(" ".join(str(i) for i in range(total)))
+    raise SystemExit
+result = []
+for part in text.replace(",", " ").split():
+    if "-" in part:
+        left, right = part.split("-", 1)
+        if not left.isdigit() or not right.isdigit():
+            raise SystemExit(2)
+        values = range(int(left), int(right) + 1)
+    else:
+        if not part.isdigit():
+            raise SystemExit(2)
+        values = [int(part)]
+    for value in values:
+        if value < 1 or value > total:
+            raise SystemExit(2)
+        index = value - 1
+        if index not in result:
+            result.append(index)
+print(" ".join(str(index) for index in result))
+PY
+}
+
+_select_many() {
+  local title="$1"
+  shift
+  local items=("$@") total="${#items[@]}" selected=0
+  local checks=() visible top=0 rendered=0 menu_lines key rest index end input parsed count
+
+  [ "$total" -gt 0 ] || return 1
+  for (( index=0; index<total; index++ )); do checks+=(0); done
+
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    printf '%s\n' "$title" >&2
+    for (( index=0; index<total; index++ )); do printf '  %d) %s\n' "$(( index + 1 ))" "${items[$index]}" >&2; done
+    printf '输入编号（如 1,3-5；a=全部）: ' >&2
+    read -r input
+    parsed="$(_parse_index_selection "$input" "$total" 2>/dev/null)" || return 1
+    [ -n "$parsed" ] || return 1
+    MULTI_SELECTED=()
+    for index in $parsed; do MULTI_SELECTED+=("${items[$index]}"); done
+    return 0
+  fi
+
+  visible="$(_menu_height)"; [ "$visible" -gt "$total" ] && visible="$total"
+  menu_lines=$(( visible + 4 ))
+  _render_select_many() {
+    [ "$rendered" -eq 1 ] && printf '\033[%dA\033[J' "$menu_lines" >&2
+    rendered=1
+    [ "$selected" -lt "$top" ] && top="$selected"
+    [ "$selected" -ge $(( top + visible )) ] && top=$(( selected - visible + 1 ))
+    end=$(( top + visible )); [ "$end" -gt "$total" ] && end="$total"
+    count=0; for (( index=0; index<total; index++ )); do [ "${checks[$index]}" -eq 1 ] && count=$(( count + 1 )); done
+    printf '%s (%d/%d，已选 %d):\n' "$title" "$(( selected + 1 ))" "$total" "$count" >&2
+    for (( index=top; index<end; index++ )); do
+      if [ "$selected" -eq "$index" ]; then
+        printf '> [%s] \033[7m%s\033[0m\n' "$([ "${checks[$index]}" -eq 1 ] && printf x || printf ' ')" "${items[$index]}" >&2
+      else
+        printf '  [%s] %s\n' "$([ "${checks[$index]}" -eq 1 ] && printf x || printf ' ')" "${items[$index]}" >&2
+      fi
+    done
+    printf '\n↑/↓ 移动，Space 勾选，a 全选/清空，Enter 确认，q 取消\n' >&2
+  }
+
+  trap 'printf "\033[?25h" >&2; exit 130' INT TERM
+  printf '\033[?25l' >&2
+  _render_select_many
+  while true; do
+    IFS= read -rsn1 key
+    case "$key" in
+      $'\x1b')
+        IFS= read -rsn2 -t 1 rest || true
+        case "$rest" in
+          "[A"|"OA"|"[D"|"OD") selected=$(( (selected + total - 1) % total )) ;;
+          "[B"|"OB"|"[C"|"OC") selected=$(( (selected + 1) % total )) ;;
+        esac ;;
+      " ") checks[$selected]=$(( 1 - checks[$selected] )) ;;
+      a|A)
+        count=0; for (( index=0; index<total; index++ )); do [ "${checks[$index]}" -eq 1 ] && count=$(( count + 1 )); done
+        for (( index=0; index<total; index++ )); do [ "$count" -eq "$total" ] && checks[$index]=0 || checks[$index]=1; done
+        ;;
+      "")
+        count=0; for (( index=0; index<total; index++ )); do [ "${checks[$index]}" -eq 1 ] && count=$(( count + 1 )); done
+        [ "$count" -gt 0 ] && break
+        ;;
+      q|Q) printf '\033[?25h\n' >&2; trap - INT TERM; return 1 ;;
+    esac
+    _render_select_many
+  done
+  printf '\033[?25h\n' >&2
+  trap - INT TERM
+  MULTI_SELECTED=()
+  for (( index=0; index<total; index++ )); do [ "${checks[$index]}" -eq 1 ] && MULTI_SELECTED+=("${items[$index]}"); done
+}
+
+# ---- profiles 扫描 ----
+profiles=()
+while IFS= read -r f; do
+  [ -n "$f" ] && profiles+=("$(basename "$f" .env)")
+done < <(find "$PROFILES_DIR" -maxdepth 1 -name '*.env' 2>/dev/null | sort)
+if [ -f "$PROFILES_DIR/claude-plbbl.env" ]; then
+  ordered_profiles=("claude-plbbl")
+  for p in "${profiles[@]}"; do [ "$p" = claude-plbbl ] || ordered_profiles+=("$p"); done
+  profiles=("${ordered_profiles[@]}")
+fi
+
+# 读展示字段，不 source profile。
+_field() { grep -E "^$2=" "$PROFILES_DIR/$1.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true; }
+
+label_of() {
+  local p="$1" lbl launch model
+  lbl="$(_field "$p" CLAUDE_ALL_LABEL)"
+  [ -n "$lbl" ] && { printf '%s (%s)' "$p" "$lbl"; return; }
+  launch="$(_field "$p" CLAUDE_ALL_LAUNCH)"
+  model="$(_field "$p" CLAUDE_ALL_DEFAULT_MODEL)"
+  if [ -z "$model" ]; then
+    model="$(_field "$p" ANTHROPIC_MODEL)"; model="${model:-$(_field "$p" CLAUDE_ALL_MODEL)}"
+  fi
+  case "$launch" in
+    cmd) printf '%s (%s)' "$p" "$(_field "$p" CLAUDE_ALL_CMD)" ;;
+    *) [ -n "$model" ] && printf '%s (%s)' "$p" "$model" || printf '%s' "$p" ;;
+  esac
+}
+
+_model_index() {
+  local wanted="$1"
+  shift
+  local items=("$@") index
+  for (( index=0; index<${#items[@]}; index++ )); do [ "${items[$index]}" = "$wanted" ] && { printf '%s' "$index"; return; }; done
+  printf '0'
+}
+
+_profile_models() {
+  PROFILE_MODELS=()
+  if [ -n "${CLAUDE_ALL_MODELS:-}" ]; then
+    while IFS= read -r model_id || [ -n "$model_id" ]; do [ -n "$model_id" ] && PROFILE_MODELS+=("$model_id"); done <<< "$CLAUDE_ALL_MODELS"
+  fi
+  [ "${#PROFILE_MODELS[@]}" -gt 0 ] || PROFILE_MODELS+=("${CLAUDE_ALL_DEFAULT_MODEL:-${CLAUDE_ALL_MODEL:-${ANTHROPIC_MODEL:-}}}")
+}
+
+_provider_model() {
+  case "$2" in *@*) printf '%s' "$2" ;; *) printf '%s@%s' "$1" "$2" ;; esac
+}
+
+_agent_settings_json() {
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import json
+import sys
+
+protocol, main, subagent, teammate = sys.argv[1:5]
+if protocol == "openai":
+    # Claude Code 只需要发出 opus/sonnet/haiku 家族请求；claudish 在代理层映射实际模型。
+    env = {"CLAUDE_CODE_SUBAGENT_MODEL": "sonnet"}
+else:
+    env = {
+        "ANTHROPIC_MODEL": "opus",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": main,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": main,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": subagent,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": teammate,
+        "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+    }
+print(json.dumps({"env": env, "teammateDefaultModel": "haiku"}, separators=(",", ":")))
+PY
+}
+
+_print_dry_env() {
+  env | grep -E '^(ANTHROPIC_|OPENAI_|LITELLM_|CLAUDISH_|CLAUDE_CODE_|CLAUDE_CONFIG_DIR=)' \
+    | sort | sed -E 's/^([^=]*(KEY|TOKEN)[^=]*)=.*/\1=<redacted>/' || true
+}
+
+launch() {
+  local profile="$1" main_model default_idx settings provider opus_model sonnet_model haiku_model
+  local _residual _v _main_args=()
+  shift
+
+  _residual=$(env | grep -oE '^(ANTHROPIC|CLAUDE_CODE|OPENAI|LITELLM|CLAUDISH|CLAUDE_ALL_POOL)_[A-Z0-9_]+' | cut -d= -f1 || true)
+  for _v in $_residual; do unset "$_v" 2>/dev/null || true; done
+  unset CLAUDE_CONFIG_DIR CLAUDE_ALL_LAUNCH CLAUDE_ALL_CMD CLAUDE_ALL_LABEL CLAUDE_ALL_SCHEMA \
+    CLAUDE_ALL_PROTOCOL CLAUDE_ALL_MODELS CLAUDE_ALL_DEFAULT_MODEL CLAUDE_ALL_SUBAGENT_MODEL \
+    CLAUDE_ALL_TEAM_MODEL CLAUDE_ALL_PROVIDER CLAUDE_ALL_MODEL CLAUDE_ALL_EFFORT \
+    CLAUDE_ALL_STATUSLINE 2>/dev/null || true
+
+  set -a
+  # shellcheck disable=SC1090
+  source "$PROFILES_DIR/$profile.env"
+  set +a
+  : "${CLAUDE_ALL_LAUNCH:=direct}"
+  : "${CLAUDE_ALL_STATUSLINE:=${CCGP_STATUSLINE:-yes}}"
+
+  if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
+    _profile_models
+    default_idx="$(_model_index "${CLAUDE_ALL_DEFAULT_MODEL:-}" "${PROFILE_MODELS[@]}")"
+    if [ "${#PROFILE_MODELS[@]}" -gt 1 ] && ! _has_arg --model "$@" && ! _has_arg -m "$@"; then
+      _select_one "选择本次主模型" "$default_idx" no "${PROFILE_MODELS[@]}" || return 0
+      main_model="${PROFILE_MODELS[$SELECTED_INDEX]}"
+    else
+      main_model="${PROFILE_MODELS[$default_idx]}"
+    fi
+    : "${CLAUDE_ALL_SUBAGENT_MODEL:=$main_model}"
+    : "${CLAUDE_ALL_TEAM_MODEL:=$CLAUDE_ALL_SUBAGENT_MODEL}"
+    settings="$(_agent_settings_json "${CLAUDE_ALL_PROTOCOL:-anthropic}" "$main_model" "$CLAUDE_ALL_SUBAGENT_MODEL" "$CLAUDE_ALL_TEAM_MODEL")"
+    if ! _has_arg --model "$@" && ! _has_arg -m "$@"; then _main_args=(--model opus); fi
+  fi
+
+  if [ "$CLAUDE_ALL_LAUNCH" = claudish ] && [ "${CLAUDE_ALL_STATUSLINE:-yes}" = yes ] \
+      && [ -n "$_STATUSLINE_COMMAND" ]; then
+    export CLAUDISH_STATUSLINE_COMMAND="$_STATUSLINE_COMMAND"
+    export CLAUDISH_STATUSLINE_REFRESH=60
+  fi
+
+  if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
+    case "${CLAUDE_ALL_PROTOCOL:-anthropic}" in
+      anthropic)
+        export ANTHROPIC_MODEL=opus
+        export ANTHROPIC_DEFAULT_OPUS_MODEL="$main_model"
+        export ANTHROPIC_DEFAULT_FABLE_MODEL="$main_model"
+        export ANTHROPIC_DEFAULT_SONNET_MODEL="$CLAUDE_ALL_SUBAGENT_MODEL"
+        export ANTHROPIC_DEFAULT_HAIKU_MODEL="$CLAUDE_ALL_TEAM_MODEL"
+        ;;
+      openai)
+        provider="${CLAUDE_ALL_PROVIDER:-oai}"
+        opus_model="$(_provider_model "$provider" "$main_model")"
+        sonnet_model="$(_provider_model "$provider" "$CLAUDE_ALL_SUBAGENT_MODEL")"
+        haiku_model="$(_provider_model "$provider" "$CLAUDE_ALL_TEAM_MODEL")"
+        export CLAUDISH_MODEL_OPUS="$opus_model"
+        export CLAUDISH_MODEL_SONNET="$sonnet_model"
+        export CLAUDISH_MODEL_HAIKU="$haiku_model"
+        ;;
+    esac
+  fi
+
+  if [ "${CLAUDE_ALL_DRY_RUN:-0}" = 1 ]; then
+    echo "[dry-run] profile=$profile launch=$CLAUDE_ALL_LAUNCH"
+    _print_dry_env
+    if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
+      echo "[dry-run] roles: main=$main_model subagent=$CLAUDE_ALL_SUBAGENT_MODEL teammate=$CLAUDE_ALL_TEAM_MODEL"
+    fi
+    case "$CLAUDE_ALL_LAUNCH" in
+      cmd) echo "[dry-run] would exec: $CLAUDE_ALL_CMD $*" ;;
+      direct)
+        if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
+          echo "[dry-run] would exec: claude --settings <agent-routing-json> --model opus $*"
+        else
+          echo "[dry-run] would exec: claude $*"
+        fi
+        ;;
+      claudish)
+        if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
+          echo "[dry-run] would exec: claudish --model-opus $opus_model --model-sonnet $sonnet_model --model-haiku $haiku_model -- --settings <agent-routing-json> --model opus $*"
+        else
+          echo "[dry-run] would exec: claudish --model ${CLAUDE_ALL_MODEL:-?} $*"
+        fi
+        ;;
+    esac
+    return 0
+  fi
+
+  info "启动:$(label_of "$profile")"
+  case "$CLAUDE_ALL_LAUNCH" in
+    cmd)
+      [ -n "${CLAUDE_ALL_CMD:-}" ] || die "profile '$profile' 缺 CLAUDE_ALL_CMD"
+      exec "$CLAUDE_ALL_CMD" "$@"
+      ;;
+    direct)
+      export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
+      if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
+        exec claude --settings "$settings" ${_main_args[@]+"${_main_args[@]}"} "$@"
+      else
+        exec claude "$@"
+      fi
+      ;;
+    claudish)
+      export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
+      if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
+        local _e=(); [ -n "${CLAUDE_ALL_EFFORT:-}" ] && _e=(--effort "$CLAUDE_ALL_EFFORT")
+        exec claudish --model-opus "$opus_model" --model-sonnet "$sonnet_model" --model-haiku "$haiku_model" \
+          ${_e[@]+"${_e[@]}"} -- --settings "$settings" ${_main_args[@]+"${_main_args[@]}"} "$@"
+      else
+        [ -n "${CLAUDE_ALL_MODEL:-}" ] || die "profile '$profile' 缺 CLAUDE_ALL_MODEL"
+        local _e=(); [ -n "${CLAUDE_ALL_EFFORT:-}" ] && _e=(--effort "$CLAUDE_ALL_EFFORT")
+        exec claudish --model "$CLAUDE_ALL_MODEL" ${_e[@]+"${_e[@]}"} "$@"
+      fi
+      ;;
+    *) die "profile '$profile' 未知 CLAUDE_ALL_LAUNCH='$CLAUDE_ALL_LAUNCH'(cmd/direct/claudish)" ;;
+  esac
+}
+
+_manual_models() {
+  local input model_id normalized=""
+  printf '手动输入模型 ID（多个用逗号分隔）: ' >&2
+  read -r input
+  input="${input//,/ }"
+  MANUAL_MODELS=()
+  for model_id in $input; do
+    case "$model_id" in ''|*[!A-Za-z0-9._:/@+\[\]-]*) warn "跳过不安全的模型 ID:$model_id"; continue ;; esac
+    case " $normalized " in *" $model_id "*) : ;; *) MANUAL_MODELS+=("$model_id"); normalized="$normalized $model_id" ;; esac
+  done
+  [ "${#MANUAL_MODELS[@]}" -gt 0 ]
+}
+
+_write_profile() {
+  local path="$1" name="$2" proto="$3" base="$4" key="$5" main="$6" subagent="$7" team="$8"
+  shift 8
+  local selected=("$@") blob tmp provider launch
+  blob="$(printf '%s\n' "${selected[@]}")"
+  tmp="$PROFILES_DIR/.$name.env.tmp.$$"
+  [ "$proto" = openai ] && { provider=oai; launch=claudish; } || { provider=""; launch=direct; }
+  (
+    trap 'rm -f "$tmp"' EXIT INT TERM
+    umask 077
+    {
+      printf '# %s — claude-all profile(add 向导生成)\n' "$name"
+      printf '# 模型角色:opus=主模型，sonnet=subagent，haiku=Agent Team teammate。\n'
+      printf 'CLAUDE_ALL_SCHEMA=2\n'
+      printf 'CLAUDE_ALL_LAUNCH=%q\n' "$launch"
+      printf 'CLAUDE_ALL_PROTOCOL=%q\n' "$proto"
+      printf 'CLAUDE_ALL_MODELS=%q\n' "$blob"
+      printf 'CLAUDE_ALL_DEFAULT_MODEL=%q\n' "$main"
+      printf 'CLAUDE_ALL_SUBAGENT_MODEL=%q\n' "$subagent"
+      printf 'CLAUDE_ALL_TEAM_MODEL=%q\n' "$team"
+      if [ "$proto" = openai ]; then
+        printf 'CLAUDE_ALL_PROVIDER=%q\n' "$provider"
+        printf 'OPENAI_BASE_URL=%q\n' "$base"
+        printf 'OPENAI_API_KEY=%q\n' "$key"
+      else
+        printf 'ANTHROPIC_BASE_URL=%q\n' "$base"
+        printf 'ANTHROPIC_AUTH_TOKEN=%q\n' "$key"
+      fi
+    } > "$tmp"
+    chmod 600 "$tmp"
+    bash -n "$tmp"
+    mv "$tmp" "$path"
+    chmod 600 "$path"
+    trap - EXIT INT TERM
+  )
+}
+
+add_wizard() {
+  mkdir -p "$PROFILES_DIR"; chmod 700 "$PROFILES_DIR" 2>/dev/null || true
+  local name proto base key ow go main subagent team default_idx
+  local discovered=() selected=()
+
+  printf 'API 名称（小写字母/数字/连字符）: ' >&2; read -r name
+  case "$name" in ''|*[!a-z0-9-]*) die "名称不合法（只能小写字母/数字/连字符）" ;; esac
+  if [ -f "$PROFILES_DIR/$name.env" ]; then
+    printf "'%s' 已存在，覆盖? y/N: " "$name" >&2; read -r ow
+    [ "$ow" = y ] || { info "取消"; return 0; }
+  fi
+  printf '协议 anthropic/openai [anthropic]: ' >&2; read -r proto
+  proto="${proto:-anthropic}"
+  case "$proto" in anthropic|openai) : ;; *) die "协议只能是 anthropic 或 openai" ;; esac
+  printf 'base_url: ' >&2; read -r base
+  [ -n "$base" ] || die "base_url 不能为空"
+  printf 'api_key（输入不回显）: ' >&2; read -rs key; printf '\n' >&2
+  [ -n "$key" ] || die "api_key 不能为空"
+
+  if [ -f "$_MODEL_CATALOG" ]; then
+    # shellcheck source=/dev/null
+    source "$_MODEL_CATALOG"
+    info "读取 Models API ..."
+    if _claude_all_catalog_fetch "$proto" "$base" "$key"; then
+      discovered=("${CLAUDE_ALL_CATALOG_MODELS[@]}")
+      info "发现 ${#discovered[@]} 个模型（列表接口声明，未逐个发送推理请求）"
+      _select_many "选择这个 API 要保留的模型" "${discovered[@]}" || { info "取消"; return 0; }
+      selected=("${MULTI_SELECTED[@]}")
+    else
+      warn "${CLAUDE_ALL_CATALOG_ERROR:-Models API 不可用}；改为手动输入。"
+    fi
+  else
+    warn "缺少 model-catalog.sh；改为手动输入。"
+  fi
+  if [ "${#selected[@]}" -eq 0 ]; then
+    _manual_models || die "至少需要一个模型 ID"
+    selected=("${MANUAL_MODELS[@]}")
+  fi
+
+  _select_one "选择默认主模型" 0 yes "${selected[@]}" || { info "取消"; return 0; }
+  main="${selected[$SELECTED_INDEX]}"
+  default_idx="$(_model_index "$main" "${selected[@]}")"
+  _select_one "选择默认 subagent 模型" "$default_idx" yes "${selected[@]}" || { info "取消"; return 0; }
+  subagent="${selected[$SELECTED_INDEX]}"
+  default_idx="$(_model_index "$subagent" "${selected[@]}")"
+  _select_one "选择默认 Agent Team teammate 模型" "$default_idx" yes "${selected[@]}" || { info "取消"; return 0; }
+  team="${selected[$SELECTED_INDEX]}"
+
+  _write_profile "$PROFILES_DIR/$name.env" "$name" "$proto" "$base" "$key" "$main" "$subagent" "$team" "${selected[@]}" \
+    || die "profile 写入或语法校验失败"
+  info "已保存:$PROFILES_DIR/$name.env (600)"
+  printf '现在启动吗? y/N: ' >&2; read -r go
+  [ "$go" = y ] && launch "$name" || info "重跑 claude-all 即可看到 '$name'"
+}
+
+choose_menu() {
+  local total=$(( ${#profiles[@]} + 1 )) add_idx=$(( ${#profiles[@]} ))
+  local selected=0 rendered=0 menu_lines=$(( total + 3 )) key rest index label mark prefix input
+
+  _item_label() { [ "$1" -eq "$add_idx" ] && printf '[+ Add new API]' || label_of "${profiles[$1]}"; }
+  _render_main_menu() {
+    [ "$rendered" -eq 1 ] && printf '\033[%dA\033[J' "$menu_lines"
+    rendered=1
+    printf 'claude-all — 选择环境:\n'
+    for (( index=0; index<total; index++ )); do
+      label="$(_item_label "$index")"; mark='[ ]'; prefix=' '
+      [ "$selected" -eq "$index" ] && { mark='[✓]'; prefix='>'; }
+      [ "$selected" -eq "$index" ] && printf '%s %s \033[7m%s\033[0m\n' "$prefix" "$mark" "$label" || printf '%s %s %s\n' "$prefix" "$mark" "$label"
+    done
+    printf '\n↑/↓ 移动，Enter/Space 确认，q 退出\n'
+  }
+
+  if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo 'claude-all — 选择环境:'
+    for (( index=0; index<total; index++ )); do printf '  %d) %s\n' "$(( index + 1 ))" "$(_item_label "$index")"; done
+    read -r -p '选择 [1]: ' input; input="${input:-1}"
+    case "$input" in q|Q) echo '取消'; exit 0 ;; *[!0-9]*) die "无效选择:$input" ;; esac
+    [ "$input" -ge 1 ] 2>/dev/null && [ "$input" -le "$total" ] 2>/dev/null || die "无效选择:$input"
+    [ "$input" -eq "$total" ] && return 2
+    SELECTED_PROFILE="${profiles[$(( input - 1 ))]}"; return 0
+  fi
+
+  trap 'printf "\033[?25h"; exit 130' INT TERM
+  printf '\033[?25l'; _render_main_menu
+  while true; do
+    IFS= read -rsn1 key
+    case "$key" in
+      $'\x1b') IFS= read -rsn2 -t 1 rest || true; case "$rest" in "[A"|"OA"|"[D"|"OD") selected=$(( (selected + total - 1) % total )) ;; "[B"|"OB"|"[C"|"OC") selected=$(( (selected + 1) % total )) ;; esac ;;
+      " "|"") break ;;
+      q|Q) printf '\033[?25h\n取消\n'; exit 0 ;;
+    esac
+    _render_main_menu
+  done
+  printf '\033[?25h\n'; trap - INT TERM
   [ "$selected" -eq "$add_idx" ] && return 2
   SELECTED_PROFILE="${profiles[$selected]}"
-  return 0
 }
 
 usage() {
   cat >&2 <<'EOF'
 用法:
-  claude-all                  弹出环境选择菜单(末项 [+ Add new API])
+  claude-all                  弹出环境选择菜单
   claude-all list             列出全部 profile
-  claude-all add              添加新 API
-  claude-all <name> [args..]  直接启动指定 profile,args 透传
-删除 profile:rm ~/.claude-all/profiles/<name>.env
+  claude-all add              添加 API、发现模型并配置 agent 路由
+  claude-all <name> [args..]  直接启动指定 profile，参数透传
+删除 profile: rm ~/.claude-all/profiles/<name>.env
 EOF
   exit 2
 }
 
-# ---- 入口 ----
 case "${1:-}" in
   list)
-    [ "${#profiles[@]}" -gt 0 ] || die "没有 profile。跑 claude-all add 添加,或先 install。"
+    [ "${#profiles[@]}" -gt 0 ] || die "没有 profile。跑 claude-all add 添加，或先 install。"
     for p in "${profiles[@]}"; do printf '  %s\n' "$(label_of "$p")"; done
-    exit 0 ;;
-  add) add_wizard; exit 0 ;;
+    ;;
+  add) add_wizard ;;
   -h|--help) usage ;;
   "")
-    [ "${#profiles[@]}" -gt 0 ] || die "没有 profile(~/.claude-all/profiles 为空)。跑 claude-all add 添加,或重跑 install.sh 生成内置 profile。"
+    [ "${#profiles[@]}" -gt 0 ] || die "没有 profile（~/.claude-all/profiles 为空）。跑 claude-all add 添加。"
     SELECTED_PROFILE=""
     choose_menu || { rc=$?; [ "$rc" -eq 2 ] && { add_wizard; exit 0; }; exit "$rc"; }
-    launch "$SELECTED_PROFILE" ;;
+    launch "$SELECTED_PROFILE"
+    ;;
   *)
     p="$1"; shift
     [ -f "$PROFILES_DIR/$p.env" ] || { echo "[claude-all] 未知 profile '$p'" >&2; usage; }
-    launch "$p" "$@" ;;
+    launch "$p" "$@"
+    ;;
 esac

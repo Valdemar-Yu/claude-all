@@ -28,6 +28,23 @@ class Response:
         return self.payload
 
 
+class ContextTests(unittest.TestCase):
+    def test_claudish_metrics_override_placeholder_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "tokens-4321.json"), "w") as f:
+                json.dump({
+                    "input_tokens": 256822,
+                    "context_window": 1050000,
+                    "context_left_percent": 75,
+                }, f)
+            with mock.patch.dict(os.environ, {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4321",
+                    "CLAUDISH_STATE_DIR": directory,
+                    }, clear=False):
+                result = statusline.context_from_claudish()
+        self.assertEqual(result, (25.0, 1050000, 256822))
+
+
 class PoolTests(unittest.TestCase):
     def test_pool_average_and_nearest_reset(self):
         result = statusline.aggregate_pool_usage([
@@ -41,16 +58,18 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(result["total_accounts"], 4)
         self.assertEqual(result["resets_at"], 300)
 
-    def test_pool_ignores_invalid_and_past_resets(self):
+    def test_pool_keeps_valid_snapshot_when_refresh_failed(self):
         result = statusline.aggregate_pool_usage([
             {"reauth_required": True, "usage": {"used_percent": 0, "resets_at": 900}},
-            {"error": "bad", "usage": {"used_percent": 0, "resets_at": 900}},
-            {"usage": {"used_percent": 25, "resets_at": 50}},
+            {"error": "refresh timeout", "usage_error": "timeout",
+             "usage_status": "available", "usage": {"used_percent": 20, "resets_at": 900}},
+            {"usage": {"used_percent": 40, "resets_at": 50}},
             {"usage": {"used_percent": "25", "resets_at": 900}},
         ], now=100)
-        self.assertEqual(result["remaining_percent"], 75)
-        self.assertEqual(result["known_accounts"], 1)
-        self.assertIsNone(result["resets_at"])
+        self.assertEqual(result["remaining_percent"], 70)
+        self.assertEqual(result["known_accounts"], 2)
+        self.assertEqual(result["resets_at"], 900)
+        self.assertTrue(result["source_stale"])
 
     def test_pool_render_is_normalized_and_hides_account_count(self):
         text = statusline._ANSI_RE.sub("", statusline.fmt_gecode_pool({
@@ -59,6 +78,7 @@ class PoolTests(unittest.TestCase):
             "total_accounts": 4,
             "resets_at": time.time() + 7200,
             "stale": False,
+            "source_stale": False,
         }))
         self.assertIn("周余 95%", text)
         self.assertIn("↻", text)
@@ -91,6 +111,7 @@ class PoolTests(unittest.TestCase):
                     "known_accounts": 3,
                     "total_accounts": 4,
                     "resets_at": time.time() + 3600,
+                    "source_stale": False,
                 })
                 result = statusline.gecode_pool_quota()
                 self.assertTrue(result["stale"])

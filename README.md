@@ -56,7 +56,8 @@ Claude Code 的全部运行状态都挂在 `$CLAUDE_CONFIG_DIR` 指向的目录�
 ## 前置
 
 - Claude Code CLI
-- Node.js + claudish:`npm i -g claudish`(>= 7.12),仅 claudish 类型 profile 需要
+- Python 3 + curl：模型列表发现、JSON 解析和安全 profile 写入
+- Node.js + claudish:`npm i -g claudish`（>= 7.12），仅 OpenAI 协议 profile 需要
 - macOS 或 Linux
 
 ## 安装
@@ -77,13 +78,21 @@ curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install
 ## 用法
 
 ```bash
-claude-all                  # 菜单(↑/↓ 移动,Enter 确认,q 退出;末项 [+ Add new API])
+claude-all                  # 环境菜单；claude-plbbl 固定在第一项
 claude-all list             # 列出全部 profile
-claude-all add              # 添加向导(名称/协议/base_url/key/model)
-claude-all claude-plbbl -i  # 跳过菜单直接启动,参数透传
+claude-all add              # 输入 base URL/key 后发现模型并配置三个角色
+claude-all claude-plbbl -i  # 跳过菜单直接启动，参数透传
 ```
 
-Add 向导根据协议生成对应 profile:anthropic → `direct`,openai → `claudish`。删一个后端就是 `rm ~/.claude-all/profiles/<name>.env`。模板见 [`profiles/`](profiles/)。菜单交互思路借鉴 [WaldronZ/scripts](https://github.com/WaldronZ/scripts)。
+`add` 会读取该连接的 Models API，显示 `data[].id` 多选菜单，然后分别选择默认主模型、subagent 模型和 Agent Team teammate 模型。一个 API 仍只占一个环境菜单项；profile 保留多个候选主模型时，启动后会出现二级模型菜单，默认模型直接回车即可。Models API 列表只表示服务端声明模型存在，不代表 claude-all 已逐个发送推理请求。列表接口不可用时可手动输入模型 ID。
+
+Anthropic 协议生成 `direct` profile；OpenAI 协议生成 `claudish` profile。删一个后端就是 `rm ~/.claude-all/profiles/<name>.env`。模板见 [`profiles/`](profiles/)。菜单交互思路借鉴 [WaldronZ/scripts](https://github.com/WaldronZ/scripts)。
+
+## Agent 与 Agent Team 模型
+
+新版 profile 用 Claude 的三个标准角色做稳定路由：`opus` 对应本次主模型，`sonnet` 对应默认 subagent，`haiku` 对应新建 Agent Team teammate。OpenAI 中转由 claudish 的 `model-opus/model-sonnet/model-haiku` 映射到实际 GPT 模型；不会传一个全局 explicit model，把所有请求压到同一后端。
+
+这些值是默认值：custom agent 的 `model:` frontmatter、Agent tool 单次 model 参数和 leader 创建 teammate 时的 override 仍可覆盖。当前 claudish 7.12.1 的 `model-subagent` 虽然出现在 help/config 中，但实际请求路由没有接线，因此 claude-all 不依赖它。
 
 ## Statusline
 
