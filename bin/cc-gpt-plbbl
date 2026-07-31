@@ -66,5 +66,48 @@ case " $* " in
   *) _EFFORT_ARGS=(--effort "$CCGP_EFFORT") ;;
 esac
 
+# ── 按当前模型校准 harness auto-compact 窗口 ──────────────────────────
+# claudish 给 claude 设 ANTHROPIC_MODEL=oai@<model>,claude 不认识该名 → 按扩展
+# 窗口 1M 算 auto-compact;而 plbbl 后端真实窗口小得多(实测 gpt-5.6-sol ~400k),
+# 不校准会撑过后端窗口 → 502 "exceeds the context window"。这里按模型把窗口压到真实值,
+# 触发 harness 自带的 context 压缩(就是 CLAUDE_CODE_AUTO_COMPACT_WINDOW 机制,非另造)。
+# 触发点 = (真实窗口 − 输出余量) × PCT%。sol:(400000−20000)×75% = 285000,与原 380000/75 等价。
+_ccgp_active_model() {
+  # 从 "$@" 解析 --model/-m(--model X / --model=X / -m X / -m=X);无则回退 $CCGP_MODEL
+  local found=0 a
+  for a in "$@"; do
+    case "$a" in
+      --model=*) printf '%s' "${a#--model=}"; return ;;
+      -m=*)      printf '%s' "${a#-m=}"; return ;;
+      --model|-m) found=1 ;;
+      *) [ "$found" = 1 ] && { printf '%s' "$a"; return; } ;;
+    esac
+  done
+  printf '%s' "$CCGP_MODEL"   # --model 未传,或末尾无值
+}
+_ccgp_context_window() {
+  # model → 官方 context window(tokens)。$1 可带 provider@ 前缀,自动剥离。
+  # 第一处匹配生效,故具体型号(codex-spark / mini)写在前,泛化系列写在后。
+  # 数据源:OpenAI 官方文档/公告,2026-07 核实:
+  #   - GPT-5 标准系列(5.0/5.1/5.3/5.5/5.6 及 5.4-mini)= 400k(272k 输入 + 128k 输出);
+  #     5.6 经 plbbl 实测吻合(claudish 日志 prompt_tokens 到 369411 仍成功)。
+  #   - GPT-5.4 = 最高 1M(922k 输入 + 128k 输出);plbbl 是否放行 1M 未实测,撞 502 改 400000。
+  #   - GPT-5.3-Codex-Spark / gpt-5-chat-latest = 128k(明显小于标准系列)。
+  # plbbl 中转可能进一步收窄;env 覆盖:CCGP_DEFAULT_CONTEXT_WINDOW(未知模型保守默认)。
+  local m="${1##*@}"
+  case "$m" in
+    *codex-spark*)      echo 128000 ;;
+    *gpt-5.4-mini*)     echo 400000 ;;
+    *gpt-5.4*)          echo 1000000 ;;
+    *gpt-5.6*|*gpt-5.5*|*gpt-5.1*|*gpt-5.3*|gpt-5|gpt-5-*) echo 400000 ;;
+    *chat-latest*)      echo 128000 ;;
+    *) echo "${CCGP_DEFAULT_CONTEXT_WINDOW:-200000}" ;;
+  esac
+}
+_ACTIVE_MODEL="$(_ccgp_active_model "$@")"
+_CTX_WIN="$(_ccgp_context_window "$_ACTIVE_MODEL")"
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW=$(( _CTX_WIN - ${CCGP_OUTPUT_HEADROOM:-20000} ))
+export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="${CCGP_AUTOCOMPACT_PCT:-75}"
+
 # 空数组用 ${arr[@]+"${arr[@]}"} 规避 macOS bash 3.2 + set -u 的 unbound 报错
 exec claudish ${_MODEL_ARGS[@]+"${_MODEL_ARGS[@]}"} ${_EFFORT_ARGS[@]+"${_EFFORT_ARGS[@]}"} "$@"
