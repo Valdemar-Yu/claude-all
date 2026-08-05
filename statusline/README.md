@@ -3,7 +3,7 @@
 claude-all 内置一份 Claude Code 单行状态栏，合并自 [`cc-statusline`](https://github.com/Valdemar-Yu/cc-statusline) 的 Claude/Kimi/GLM 支持，并加入可配置的 PLBBL 账号池周额度。
 
 ```text
-🤖 gpt-5.6-sol ⚡xhigh  🧠 ██░░░░░░ 20% (40k/200k)  📅 周余 95% ↻6d10h  🕐 26-07-22 15:33
+🤖 gpt-5.6-sol ⚡xhigh  🧠 ██░░░░░░ 20% (80k/400k)  📅 周余 95% ↻6d10h  🕐 26-07-22 15:33
 ```
 
 ## 显示内容
@@ -16,7 +16,7 @@ claude-all 内置一份 Claude Code 单行状态栏，合并自 [`cc-statusline`
 - 可选 PLBBL 账号池周剩余额度：多个账号归一化到 0–100%，并选最近的未来重置时间。
 - 根据终端宽度降级的时钟。
 
-缺失或请求失败的分段会被省略，不会让状态栏脚本退出。`refreshInterval: 60` 使倒计时在空闲时继续更新。
+上下文最大值优先采用 claude-all 根据当前模型和中转路由传入的有效上限；PLBBL 下 GPT-5.6 是 400k，GPT-5.4 是 1M。缺失或请求失败的分段会被省略，不会让状态栏脚本退出。`refreshInterval: 60` 使倒计时在空闲时继续更新。
 
 ## 安装
 
