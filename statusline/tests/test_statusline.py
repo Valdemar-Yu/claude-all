@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -29,20 +30,133 @@ class Response:
 
 
 class ContextTests(unittest.TestCase):
-    def test_claudish_metrics_override_placeholder_usage(self):
+    def write_claudish_metrics(self, directory, **overrides):
+        metrics = {
+            "input_tokens": 100000,
+            "context_window": 1050000,
+            "context_left_percent": 75,
+        }
+        metrics.update(overrides)
+        with open(os.path.join(directory, "tokens-4321.json"), "w") as f:
+            json.dump(metrics, f)
+
+    def test_claudish_metrics_use_consistent_input_percentage(self):
         with tempfile.TemporaryDirectory() as directory:
-            with open(os.path.join(directory, "tokens-4321.json"), "w") as f:
-                json.dump({
-                    "input_tokens": 256822,
-                    "context_window": 1050000,
-                    "context_left_percent": 75,
-                }, f)
+            self.write_claudish_metrics(directory, input_tokens=256822)
             with mock.patch.dict(os.environ, {
                     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4321",
                     "CLAUDISH_STATE_DIR": directory,
-                    }, clear=False):
+                    }, clear=True):
                 result = statusline.context_from_claudish()
-        self.assertEqual(result, (25.0, 1050000, 256822))
+        self.assertAlmostEqual(result[0], 256822 / 1050000 * 100)
+        self.assertEqual(result[1:], (1050000, 256822))
+
+    def test_effective_window_overrides_claudish_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write_claudish_metrics(directory)
+            with mock.patch.dict(os.environ, {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4321",
+                    "CLAUDISH_STATE_DIR": directory,
+                    "CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW": "400000",
+                    }, clear=True):
+                result = statusline.context_from_claudish()
+        self.assertEqual(result, (25.0, 400000, 100000))
+        data = {"model": {"id": "oai@gpt-5.6-sol",
+                          "display_name": "gpt-5.6-sol (1M context)"}}
+        self.assertEqual(statusline.fmt_model(data, result), "gpt-5.6-sol")
+
+    def test_one_million_effective_window_keeps_model_tag(self):
+        ctx = (10.0, 1000000, 100000)
+        data = {"model": {"id": "oai@gpt-5.4", "display_name": "gpt-5.4"}}
+        self.assertEqual(statusline.fmt_model(data, ctx), "gpt-5.4 [1M]")
+
+    def test_role_window_follows_active_model(self):
+        env = {
+            "CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW": "1000000",
+            "CLAUDE_ALL_CONTEXT_MODEL_OPUS": "gpt-5.4",
+            "CLAUDE_ALL_CONTEXT_WINDOW_OPUS": "1000000",
+            "CLAUDE_ALL_CONTEXT_MODEL_SONNET": "gpt-5.3-codex-spark",
+            "CLAUDE_ALL_CONTEXT_WINDOW_SONNET": "128000",
+        }
+        data = {"model": {"id": "sonnet",
+                          "display_name": "gpt-5.3-codex-spark"}}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(statusline.effective_context_window(200000, data), 128000)
+
+    def test_route_model_matching_does_not_use_prefixes(self):
+        env = {
+            "CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW": "1000000",
+            "CLAUDE_ALL_CONTEXT_MODEL_OPUS": "gpt-5.4",
+            "CLAUDE_ALL_CONTEXT_WINDOW_OPUS": "1000000",
+            "CLAUDE_ALL_CONTEXT_MODEL_SONNET": "gpt-5.4-mini",
+            "CLAUDE_ALL_CONTEXT_WINDOW_SONNET": "400000",
+        }
+        data = {"model": {"id": "sonnet", "display_name": "gpt-5.4-mini"}}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(statusline.effective_context_window(200000, data), 400000)
+
+    def test_invalid_effective_window_falls_back_to_claudish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write_claudish_metrics(directory)
+            with mock.patch.dict(os.environ, {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4321",
+                    "CLAUDISH_STATE_DIR": directory,
+                    "CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW": "invalid",
+                    }, clear=True):
+                result = statusline.context_from_claudish()
+        self.assertEqual(result[1:], (1050000, 100000))
+
+    def test_render_gpt_56_uses_400k_without_one_m_tag(self):
+        data = {
+            "model": {"id": "oai@gpt-5.6-sol", "display_name": "gpt-5.6-sol"},
+            "context_window": {
+                "used_percentage": 5,
+                "context_window_size": 1050000,
+                "total_input_tokens": 100000,
+            },
+        }
+        with mock.patch.dict(os.environ, {
+                "CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW": "400000",
+                "COLUMNS": "200",
+                }, clear=True), \
+                mock.patch.object(statusline.sys, "stdin", io.StringIO(json.dumps(data))), \
+                mock.patch.object(statusline.sys, "stdout", new_callable=io.StringIO) as output, \
+                mock.patch.object(statusline, "gecode_pool_quota", return_value=None), \
+                mock.patch.object(statusline, "kimi_quota", return_value=None), \
+                mock.patch.object(statusline, "glm_quota", return_value=None):
+            statusline.main()
+            text = statusline._ANSI_RE.sub("", output.getvalue())
+        self.assertIn("gpt-5.6-sol", text)
+        self.assertIn("25% (100k/400k)", text)
+        self.assertNotIn("[1M]", text)
+        self.assertNotIn("/1M", text)
+
+    def test_official_and_transcript_fallbacks_use_effective_window(self):
+        official = {"context_window": {
+            "used_percentage": 5,
+            "context_window_size": 200000,
+            "total_input_tokens": 100000,
+        }}
+        with mock.patch.dict(os.environ, {
+                "CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW": "400000",
+                }, clear=True):
+            self.assertEqual(statusline.context_from_official(official),
+                             (25.0, 400000, 100000))
+            with tempfile.NamedTemporaryFile("w", delete=False) as transcript:
+                transcript.write(json.dumps({"message": {"usage": {
+                    "input_tokens": 50000,
+                    "cache_read_input_tokens": 25000,
+                    "cache_creation_input_tokens": 25000,
+                }}}) + "\n")
+                path = transcript.name
+            try:
+                result = statusline.context_from_transcript({
+                    "transcript_path": path,
+                    "model": {"id": "oai@gpt-5.6-sol"},
+                })
+            finally:
+                os.unlink(path)
+        self.assertEqual(result, (25.0, 400000, 100000))
 
 
 class PoolTests(unittest.TestCase):

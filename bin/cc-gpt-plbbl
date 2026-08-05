@@ -24,6 +24,7 @@ fi
 # shellcheck source=/dev/null
 source "$_LIB/config.sh"
 source "$_LIB/token.sh"
+source "$_LIB/context-window.sh"
 
 # 解析 token
 _ccgp_resolve_token || {
@@ -57,14 +58,20 @@ fi
 export CLAUDE_CONFIG_DIR="$CCGP_CONFIG_DIR"
 
 # --model/-m、--effort 已显式传则不覆盖默认
-case " $* " in
-  *" --model "*|*" -m "*) _MODEL_ARGS=() ;;
-  *) _MODEL_ARGS=(--model "$CCGP_MODEL") ;;
-esac
-case " $* " in
-  *" --effort "*) _EFFORT_ARGS=() ;;
-  *) _EFFORT_ARGS=(--effort "$CCGP_EFFORT") ;;
-esac
+if _claude_all_has_model_arg "$@"; then
+  _MODEL_ARGS=()
+else
+  _MODEL_ARGS=(--model "$CCGP_MODEL")
+fi
+if _claude_all_has_effort_arg "$@"; then
+  _EFFORT_ARGS=()
+else
+  _EFFORT_ARGS=(--effort "$CCGP_EFFORT")
+fi
+
+_ACTIVE_MODEL="$(_claude_all_active_model "$CCGP_MODEL" "$@")"
+_claude_all_export_context_window "$_ACTIVE_MODEL"
+_claude_all_normalize_claudish_args "$@"
 
 # ── 按当前模型校准 harness auto-compact 窗口 ──────────────────────────
 # claudish 给 claude 设 ANTHROPIC_MODEL=oai@<model>,claude 不认识该名 → 按扩展
@@ -110,4 +117,5 @@ export CLAUDE_CODE_AUTO_COMPACT_WINDOW=$(( _CTX_WIN - ${CCGP_OUTPUT_HEADROOM:-20
 export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="${CCGP_AUTOCOMPACT_PCT:-75}"
 
 # 空数组用 ${arr[@]+"${arr[@]}"} 规避 macOS bash 3.2 + set -u 的 unbound 报错
-exec claudish ${_MODEL_ARGS[@]+"${_MODEL_ARGS[@]}"} ${_EFFORT_ARGS[@]+"${_EFFORT_ARGS[@]}"} "$@"
+exec claudish ${_MODEL_ARGS[@]+"${_MODEL_ARGS[@]}"} ${_EFFORT_ARGS[@]+"${_EFFORT_ARGS[@]}"} \
+  ${CLAUDE_ALL_NORMALIZED_ARGS[@]+"${CLAUDE_ALL_NORMALIZED_ARGS[@]}"}

@@ -52,6 +52,67 @@ printf '%s' "$status"
 SH
 chmod +x "$TMP/bin/curl"
 
+cat > "$TMP/bin/claudish" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW=%s\n' "${CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW:-}"
+printf 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=%s\n' "${CLAUDE_CODE_AUTO_COMPACT_WINDOW:-}"
+printf 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=%s\n' "${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-}"
+printf 'ARGS='
+printf ' <%s>' "$@"
+printf '\n'
+SH
+chmod +x "$TMP/bin/claudish"
+
+# 模型参数解析、窗口映射与 wrapper 实际导出。
+# shellcheck source=/dev/null
+source "$ROOT/lib/context-window.sh"
+assert_eq "$(_claude_all_active_model fallback --model oai@gpt-5.6-sol)" 'oai@gpt-5.6-sol'
+assert_eq "$(_claude_all_active_model fallback --model=oai@gpt-5.5)" 'oai@gpt-5.5'
+assert_eq "$(_claude_all_active_model fallback -m oai@gpt-5.4)" 'oai@gpt-5.4'
+assert_eq "$(_claude_all_active_model fallback -m=oai@gpt-5.3-chat-latest)" 'oai@gpt-5.3-chat-latest'
+assert_eq "$(_claude_all_active_model fallback --model first -m second)" 'second'
+assert_eq "$(_claude_all_active_model fallback -- --model ignored)" 'fallback'
+assert_eq "$(_claude_all_active_model fallback --model)" 'fallback'
+assert_eq "$(_claude_all_context_window oai@gpt-5.6-sol)" '400000'
+assert_eq "$(_claude_all_context_window oai@gpt-5.4)" '1000000'
+assert_eq "$(_claude_all_context_window oai@gpt-5.4-mini)" '400000'
+assert_eq "$(_claude_all_context_window oai@gpt-5.3-codex-spark)" '128000'
+assert_eq "$(_claude_all_context_window oai@gpt-5.3-chat-latest)" '128000'
+assert_eq "$(_claude_all_context_window oai@gpt-5-chat-latest)" '128000'
+assert_eq "$(CCGP_DEFAULT_CONTEXT_WINDOW=250000 _claude_all_context_window other-model)" '250000'
+
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" CCGP_CONFIG_FILE="$TMP/missing-config" CCGP_TOKEN=TEST_SECRET \
+  CCGP_MODEL=oai@gpt-default "$ROOT/bin/cc-gpt-plbbl" --model=oai@gpt-5.6-sol \
+  > "$TMP/wrapper-56.out"
+assert_contains "$TMP/wrapper-56.out" 'CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW=400000'
+assert_contains "$TMP/wrapper-56.out" 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=380000'
+assert_contains "$TMP/wrapper-56.out" 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=75'
+assert_contains "$TMP/wrapper-56.out" 'ARGS= <--effort> <xhigh> <--model> <oai@gpt-5.6-sol>'
+assert_not_contains "$TMP/wrapper-56.out" 'oai@gpt-default'
+
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" CCGP_CONFIG_FILE="$TMP/missing-config" CCGP_TOKEN=TEST_SECRET \
+  CCGP_MODEL=oai@gpt-default "$ROOT/bin/cc-gpt-plbbl" --model oai@gpt-5.4 --model=oai@gpt-5.3-codex-spark \
+  > "$TMP/wrapper-repeat.out"
+assert_contains "$TMP/wrapper-repeat.out" 'CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW=128000'
+assert_contains "$TMP/wrapper-repeat.out" 'ARGS= <--effort> <xhigh> <--model> <oai@gpt-5.4> <--model> <oai@gpt-5.3-codex-spark>'
+
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" CCGP_CONFIG_FILE="$TMP/missing-config" CCGP_TOKEN=TEST_SECRET \
+  CCGP_MODEL=oai@gpt-5.5 "$ROOT/bin/cc-gpt-plbbl" -- --model opus > "$TMP/wrapper-separator.out"
+assert_contains "$TMP/wrapper-separator.out" 'CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW=400000'
+assert_contains "$TMP/wrapper-separator.out" 'ARGS= <--model> <oai@gpt-5.5> <--effort> <xhigh> <--> <--model> <opus>'
+
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" CCGP_CONFIG_FILE="$TMP/missing-config" CCGP_TOKEN=TEST_SECRET \
+  CCGP_MODEL=oai@gpt-5.4 "$ROOT/bin/cc-gpt-plbbl" > "$TMP/wrapper-54.out"
+assert_contains "$TMP/wrapper-54.out" 'CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW=1000000'
+assert_contains "$TMP/wrapper-54.out" 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=980000'
+assert_contains "$TMP/wrapper-54.out" 'ARGS= <--model> <oai@gpt-5.4> <--effort> <xhigh>'
+
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" CCGP_CONFIG_FILE="$TMP/missing-config" CCGP_TOKEN=TEST_SECRET \
+  "$ROOT/bin/cc-gpt-plbbl" --effort=low > "$TMP/wrapper-effort.out"
+assert_contains "$TMP/wrapper-effort.out" 'ARGS= <--model> <oai@gpt-5.6-sol> <--effort> <low>'
+assert_not_contains "$TMP/wrapper-effort.out" '<xhigh>'
+
 # URL 规范化与模型解析。
 # shellcheck source=/dev/null
 source "$ROOT/lib/model-catalog.sh"
@@ -103,6 +164,41 @@ assert_contains "$TMP/dry-openai.out" '--model-haiku oai@gpt-team'
 assert_not_contains "$TMP/dry-openai.out" 'claudish --model oai@gpt-main'
 assert_not_contains "$TMP/dry-openai.out" 'TEST_SECRET'
 
+cat > "$TMP/home/.claude-all/profiles/mixed-context.env" <<'EOF'
+CLAUDE_ALL_SCHEMA=2
+CLAUDE_ALL_LAUNCH=claudish
+CLAUDE_ALL_PROTOCOL=openai
+CLAUDE_ALL_PROVIDER=oai
+CLAUDE_ALL_MODELS=gpt-5.4
+CLAUDE_ALL_DEFAULT_MODEL=gpt-5.4
+CLAUDE_ALL_SUBAGENT_MODEL=gpt-5.3-codex-spark
+CLAUDE_ALL_TEAM_MODEL=gpt-5.6-sol
+OPENAI_BASE_URL=https://relay.example/v1
+OPENAI_API_KEY=TEST_SECRET
+EOF
+env HOME="$TMP/home" PATH="$TMP/bin:$PATH" CLAUDE_ALL_PROFILES_DIR="$TMP/home/.claude-all/profiles" CLAUDE_ALL_DRY_RUN=1 \
+  "$ROOT/bin/claude-all" mixed-context > "$TMP/dry-mixed.out"
+assert_contains "$TMP/dry-mixed.out" 'CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW=1000000'
+assert_contains "$TMP/dry-mixed.out" 'CLAUDE_CODE_AUTO_COMPACT_WINDOW=108000'
+assert_contains "$TMP/dry-mixed.out" 'CLAUDE_ALL_CONTEXT_WINDOW_OPUS=1000000'
+assert_contains "$TMP/dry-mixed.out" 'CLAUDE_ALL_CONTEXT_WINDOW_SONNET=128000'
+assert_contains "$TMP/dry-mixed.out" 'CLAUDE_ALL_CONTEXT_WINDOW_HAIKU=400000'
+env HOME="$TMP/home" PATH="$TMP/bin:$PATH" CLAUDE_ALL_PROFILES_DIR="$TMP/home/.claude-all/profiles" CLAUDE_ALL_DRY_RUN=1 \
+  "$ROOT/bin/claude-all" mixed-context -- --model sonnet > "$TMP/dry-mixed-separator.out"
+assert_contains "$TMP/dry-mixed-separator.out" '--model opus -- --model sonnet'
+
+cat > "$TMP/home/.claude-all/profiles/legacy-context.env" <<'EOF'
+CLAUDE_ALL_LAUNCH=claudish
+CLAUDE_ALL_MODEL=oai@gpt-5.6-sol
+OPENAI_BASE_URL=https://relay.example/v1
+OPENAI_API_KEY=TEST_SECRET
+EOF
+env HOME="$TMP/home" PATH="$TMP/bin:$PATH" CLAUDE_ALL_PROFILES_DIR="$TMP/home/.claude-all/profiles" CLAUDE_ALL_DRY_RUN=1 \
+  "$ROOT/bin/claude-all" legacy-context --model=oai@gpt-5.4 > "$TMP/dry-legacy-model.out"
+assert_contains "$TMP/dry-legacy-model.out" 'CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW=1000000'
+assert_contains "$TMP/dry-legacy-model.out" 'would exec: claudish --model oai@gpt-5.4'
+assert_not_contains "$TMP/dry-legacy-model.out" 'would exec: claudish --model oai@gpt-5.6-sol'
+
 # Models API 失败时允许手动输入；direct profile 生成相同的角色语义。
 printf '%s\n' \
   direct-api anthropic 'https://anthropic.example' 'TEST_SECRET' \
@@ -134,4 +230,5 @@ env HOME="$TMP/home" CLAUDE_ALL_PROFILES_DIR="$TMP/home/.claude-all/profiles" "$
 first="$(sed -n '1p' "$TMP/list.out")"
 case "$first" in *claude-plbbl*) : ;; *) fail "plbbl 不是首项: $first" ;; esac
 
+python3 "$ROOT/tests/test_add_tty.py"
 printf 'PASS: claude-all model wizard tests\n'

@@ -99,10 +99,10 @@ Anthropic 协议生成 `direct` profile；OpenAI 协议生成 `claudish` profile
 claude-all 内置统一 Statusline，合并了 [`cc-statusline`](https://github.com/Valdemar-Yu/cc-statusline) 的 Claude 官方、Kimi Coding Plan、Z.ai GLM Coding Plan 配额，并支持可配置的 PLBBL 账号池周额度。
 
 ```text
-🤖 gpt-5.6-sol ⚡xhigh  🧠 ██░░░░░░ 20% (40k/200k)  📅 周余 95% ↻6d10h  🕐 26-07-22 15:33
+🤖 gpt-5.6-sol ⚡xhigh  🧠 ██░░░░░░ 20% (80k/400k)  📅 周余 95% ↻6d10h  🕐 26-07-22 15:33
 ```
 
-账号池额度会把多个账号的剩余额度归一化为 0–100%，并显示最近一次额度重置倒计时。账号池 URL 和 macOS Keychain service 从本地配置读取；仓库不保存访问口令、Cookie、账号或 token。主安装器配置 claude-all 管理的 config 目录；如需同时写入官方 Claude 和外部 GLM wrapper 的 settings：
+上下文最大值按当前模型和中转路由的有效上限显示；PLBBL 下 GPT-5.6 按 400k，GPT-5.4 按 1M。账号池额度会把多个账号的剩余额度归一化为 0–100%，并显示最近一次额度重置倒计时。账号池 URL 和 macOS Keychain service 从本地配置读取；仓库不保存访问口令、Cookie、账号或 token。主安装器配置 claude-all 管理的 config 目录；如需同时写入官方 Claude 和外部 GLM wrapper 的 settings：
 
 ```bash
 CCGP_STATUSLINE_GLOBAL=1 CCGP_SKIP_PROBE=1 ./install.sh

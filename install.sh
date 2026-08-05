@@ -2,7 +2,7 @@
 # claude-all 安装器(cc-gpt-plbbl 为兼容入口)。支持本地 clone 与 curl | bash。
 set -euo pipefail
 
-CCGP_VERSION="3.0.0"
+CCGP_VERSION="3.0.1"
 CCGP_REPO="${CCGP_REPO:-Valdemar-Yu/claude-all}"
 CCGP_REF="${CCGP_REF:-main}"
 

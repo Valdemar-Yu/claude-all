@@ -19,6 +19,11 @@ if [ -f "$_PREFIX/lib/statusline.sh" ]; then
   _STATUSLINE_COMMAND="$(_claude_all_statusline_command "$_PREFIX")"
 fi
 _MODEL_CATALOG="$_PREFIX/lib/model-catalog.sh"
+_CONTEXT_WINDOW_LIB="$_PREFIX/lib/context-window.sh"
+if [ -f "$_CONTEXT_WINDOW_LIB" ]; then
+  # shellcheck source=/dev/null
+  source "$_CONTEXT_WINDOW_LIB"
+fi
 
 PROFILES_DIR="${CLAUDE_ALL_PROFILES_DIR:-$HOME/.claude-all/profiles}"
 
@@ -31,6 +36,7 @@ _has_arg() {
   local wanted="$1" arg
   shift
   for arg in "$@"; do
+    [ "$arg" = -- ] && break
     [ "$arg" = "$wanted" ] && return 0
     case "$arg" in "$wanted"=*) return 0 ;; esac
   done
@@ -215,6 +221,7 @@ _select_many() {
   trap - INT TERM
   MULTI_SELECTED=()
   for (( index=0; index<total; index++ )); do [ "${checks[$index]}" -eq 1 ] && MULTI_SELECTED+=("${items[$index]}"); done
+  return 0
 }
 
 # ---- profiles 扫描 ----
@@ -289,21 +296,23 @@ PY
 }
 
 _print_dry_env() {
-  env | grep -E '^(ANTHROPIC_|OPENAI_|LITELLM_|CLAUDISH_|CLAUDE_CODE_|CLAUDE_CONFIG_DIR=)' \
+  env | grep -E '^(ANTHROPIC_|OPENAI_|LITELLM_|CLAUDISH_|CLAUDE_CODE_|CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=|CLAUDE_ALL_(POOL|CONTEXT|EFFECTIVE_CONTEXT_WINDOW=)|CLAUDE_CONFIG_DIR=)' \
     | sort | sed -E 's/^([^=]*(KEY|TOKEN)[^=]*)=.*/\1=<redacted>/' || true
 }
 
 launch() {
   local profile="$1" main_model default_idx settings provider opus_model sonnet_model haiku_model
-  local _residual _v _main_args=()
+  local context_model requested_model _residual _v _main_args=() _legacy_model_args=()
   shift
+  _legacy_model_args=("$@")
 
-  _residual=$(env | grep -oE '^(ANTHROPIC|CLAUDE_CODE|OPENAI|LITELLM|CLAUDISH|CLAUDE_ALL_POOL)_[A-Z0-9_]+' | cut -d= -f1 || true)
+  _residual=$(env | grep -oE '^(ANTHROPIC|CLAUDE_CODE|OPENAI|LITELLM|CLAUDISH|CLAUDE_ALL_POOL|CLAUDE_ALL_CONTEXT)_[A-Z0-9_]+' | cut -d= -f1 || true)
   for _v in $_residual; do unset "$_v" 2>/dev/null || true; done
   unset CLAUDE_CONFIG_DIR CLAUDE_ALL_LAUNCH CLAUDE_ALL_CMD CLAUDE_ALL_LABEL CLAUDE_ALL_SCHEMA \
     CLAUDE_ALL_PROTOCOL CLAUDE_ALL_MODELS CLAUDE_ALL_DEFAULT_MODEL CLAUDE_ALL_SUBAGENT_MODEL \
     CLAUDE_ALL_TEAM_MODEL CLAUDE_ALL_PROVIDER CLAUDE_ALL_MODEL CLAUDE_ALL_EFFORT \
-    CLAUDE_ALL_STATUSLINE 2>/dev/null || true
+    CLAUDE_ALL_STATUSLINE CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW CLAUDE_AUTOCOMPACT_PCT_OVERRIDE \
+    2>/dev/null || true
 
   set -a
   # shellcheck disable=SC1090
@@ -354,6 +363,31 @@ launch() {
     esac
   fi
 
+  if [ "$CLAUDE_ALL_LAUNCH" = claudish ] && command -v _claude_all_export_context_window >/dev/null 2>&1; then
+    if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
+      requested_model="$(_claude_all_active_model "$main_model" "$@")"
+      case "${requested_model##*@}" in
+        opus) context_model="$main_model" ;;
+        sonnet) context_model="$CLAUDE_ALL_SUBAGENT_MODEL" ;;
+        haiku) context_model="$CLAUDE_ALL_TEAM_MODEL" ;;
+        *) context_model="$requested_model" ;;
+      esac
+      _claude_all_export_context_windows "$context_model" \
+        "$main_model" "$CLAUDE_ALL_SUBAGENT_MODEL" "$CLAUDE_ALL_TEAM_MODEL"
+      export CLAUDE_ALL_CONTEXT_MODEL_OPUS="$main_model"
+      export CLAUDE_ALL_CONTEXT_MODEL_SONNET="$CLAUDE_ALL_SUBAGENT_MODEL"
+      export CLAUDE_ALL_CONTEXT_MODEL_HAIKU="$CLAUDE_ALL_TEAM_MODEL"
+      export CLAUDE_ALL_CONTEXT_WINDOW_OPUS="$(_claude_all_context_window "$main_model")"
+      export CLAUDE_ALL_CONTEXT_WINDOW_SONNET="$(_claude_all_context_window "$CLAUDE_ALL_SUBAGENT_MODEL")"
+      export CLAUDE_ALL_CONTEXT_WINDOW_HAIKU="$(_claude_all_context_window "$CLAUDE_ALL_TEAM_MODEL")"
+    else
+      context_model="$(_claude_all_active_model "${CLAUDE_ALL_MODEL:-}" "$@")"
+      [ -n "$context_model" ] && _claude_all_export_context_window "$context_model"
+      _claude_all_normalize_claudish_args "$@"
+      _legacy_model_args=("${CLAUDE_ALL_NORMALIZED_ARGS[@]}")
+    fi
+  fi
+
   if [ "${CLAUDE_ALL_DRY_RUN:-0}" = 1 ]; then
     echo "[dry-run] profile=$profile launch=$CLAUDE_ALL_LAUNCH"
     _print_dry_env
@@ -373,7 +407,11 @@ launch() {
         if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
           echo "[dry-run] would exec: claudish --model-opus $opus_model --model-sonnet $sonnet_model --model-haiku $haiku_model -- --settings <agent-routing-json> --model opus $*"
         else
-          echo "[dry-run] would exec: claudish --model ${CLAUDE_ALL_MODEL:-?} $*"
+          if _claude_all_has_model_arg "$@"; then
+            echo "[dry-run] would exec: claudish ${_legacy_model_args[*]}"
+          else
+            echo "[dry-run] would exec: claudish --model ${CLAUDE_ALL_MODEL:-?} ${_legacy_model_args[*]}"
+          fi
         fi
         ;;
     esac
@@ -402,8 +440,13 @@ launch() {
           ${_e[@]+"${_e[@]}"} -- --settings "$settings" ${_main_args[@]+"${_main_args[@]}"} "$@"
       else
         [ -n "${CLAUDE_ALL_MODEL:-}" ] || die "profile '$profile' 缺 CLAUDE_ALL_MODEL"
-        local _e=(); [ -n "${CLAUDE_ALL_EFFORT:-}" ] && _e=(--effort "$CLAUDE_ALL_EFFORT")
-        exec claudish --model "$CLAUDE_ALL_MODEL" ${_e[@]+"${_e[@]}"} "$@"
+        local _e=(); [ -n "${CLAUDE_ALL_EFFORT:-}" ] && ! _claude_all_has_effort_arg "$@" && _e=(--effort "$CLAUDE_ALL_EFFORT")
+        if _claude_all_has_model_arg "$@"; then
+          exec claudish ${_e[@]+"${_e[@]}"} ${_legacy_model_args[@]+"${_legacy_model_args[@]}"}
+        else
+          exec claudish --model "$CLAUDE_ALL_MODEL" ${_e[@]+"${_e[@]}"} \
+            ${_legacy_model_args[@]+"${_legacy_model_args[@]}"}
+        fi
       fi
       ;;
     *) die "profile '$profile' 未知 CLAUDE_ALL_LAUNCH='$CLAUDE_ALL_LAUNCH'(cmd/direct/claudish)" ;;

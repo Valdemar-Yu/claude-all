@@ -106,11 +106,13 @@ def human(n):
     return str(n)
 
 def fmt_model(data, ctx):
-    """Model name; annotate 1M context window with '[1M]'."""
+    """Model name; annotate the effective 1M context window with '[1M]'."""
     name = safe_text((data.get("model") or {}).get("display_name", "Claude"))
     mid = safe_text((data.get("model") or {}).get("id", ""))
-    size = ctx[1] if ctx else 0
-    is_1m = size >= 1_000_000 or "1m" in mid.lower() or "1m" in name.lower()
+    if ctx:
+        is_1m = ctx[1] >= 1_000_000
+    else:
+        is_1m = "1m" in mid.lower() or "1m" in name.lower()
     # strip a self-supplied "(1M context)"-style suffix before re-adding a compact tag
     name = re.sub(r"\s*[\(\[][^)\]]*1m[^)\]]*[\)\]]", "", name, flags=re.I).strip()
     return f"{name} [1M]" if is_1m else name
@@ -148,8 +150,43 @@ def fmt_countdown(resets_at):
     return f"{m}m"
 
 # ---- context: prefer official fields, fall back to the transcript ----
-def context_from_claudish():
-    """Read claudish's real context metrics when Claude receives placeholder usage."""
+def _positive_int(value):
+    try:
+        value = int(value)
+        return value if value > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def effective_context_window(fallback=None, data=None):
+    """Return the active route limit, then the launcher or source fallback."""
+    if data:
+        model = data.get("model") or {}
+        candidates = {
+            safe_text(model.get("id", "")).rsplit("@", 1)[-1].lower(),
+            safe_text(model.get("display_name", "")).rsplit("@", 1)[-1].lower(),
+        }
+        candidates.discard("")
+        for role in ("opus", "sonnet", "haiku"):
+            if role in candidates:
+                window = _positive_int(os.environ.get(
+                    f"CLAUDE_ALL_CONTEXT_WINDOW_{role.upper()}"))
+                if window:
+                    return window
+        for role in ("opus", "sonnet", "haiku"):
+            route_model = os.environ.get(f"CLAUDE_ALL_CONTEXT_MODEL_{role.upper()}", "")
+            route_id = route_model.rsplit("@", 1)[-1].lower()
+            if route_id and route_id in candidates:
+                window = _positive_int(os.environ.get(
+                    f"CLAUDE_ALL_CONTEXT_WINDOW_{role.upper()}"))
+                if window:
+                    return window
+    window = _positive_int(os.environ.get("CLAUDE_ALL_EFFECTIVE_CONTEXT_WINDOW"))
+    return window or _positive_int(fallback)
+
+
+def context_from_claudish(data=None):
+    """Read claudish's token count, normalized to the route's effective window."""
     try:
         proxy = urllib.parse.urlparse(os.environ.get("ANTHROPIC_BASE_URL", ""))
         if proxy.hostname not in ("127.0.0.1", "localhost", "::1") or not proxy.port:
@@ -158,15 +195,19 @@ def context_from_claudish():
             os.environ.get("CLAUDISH_STATE_DIR", "~/.claudish"))
         with open(os.path.join(state_dir, f"tokens-{proxy.port}.json")) as f:
             metrics = json.load(f)
-        size = int(metrics["context_window"])
-        left = float(metrics["context_left_percent"])
-        if size <= 0 or not math.isfinite(left) or not 0 <= left <= 100:
+        size = effective_context_window(metrics.get("context_window"), data)
+        if not size:
             return None
-        used_pct = 100.0 - left
         input_tokens = metrics.get("input_tokens")
-        used_tokens = (int(input_tokens)
-                       if isinstance(input_tokens, int) and input_tokens >= 0
-                       else int(round(size * used_pct / 100.0)))
+        if isinstance(input_tokens, int) and input_tokens >= 0:
+            used_tokens = input_tokens
+            used_pct = max(0.0, min(100.0, used_tokens / size * 100.0))
+        else:
+            left = float(metrics["context_left_percent"])
+            if not math.isfinite(left) or not 0 <= left <= 100:
+                return None
+            used_pct = 100.0 - left
+            used_tokens = int(round(size * used_pct / 100.0))
         return used_pct, size, used_tokens
     except Exception:
         return None
@@ -175,12 +216,18 @@ def context_from_claudish():
 def context_from_official(data):
     cw = data.get("context_window") or {}
     used_pct = cw.get("used_percentage")
-    size = cw.get("context_window_size")
+    source_size = cw.get("context_window_size")
     total_in = cw.get("total_input_tokens")
-    if used_pct is None or size is None:
+    size = effective_context_window(source_size, data)
+    if used_pct is None or not size:
         return None
-    used_tok = total_in if isinstance(total_in, int) else int(round(size * used_pct / 100))
-    return float(used_pct), int(size), int(used_tok or 0)
+    if isinstance(total_in, int) and total_in >= 0:
+        used_tok = total_in
+        used_pct = max(0.0, min(100.0, used_tok / size * 100.0))
+    else:
+        used_pct = max(0.0, min(100.0, float(used_pct)))
+        used_tok = int(round(size * used_pct / 100.0))
+    return used_pct, size, int(used_tok or 0)
 
 def context_from_transcript(data):
     path = data.get("transcript_path", "")
@@ -202,8 +249,9 @@ def context_from_transcript(data):
     except Exception:
         return None
     mid = (data.get("model") or {}).get("id", "")
-    size = 1_000_000 if "1m" in mid.lower() else 200_000
-    return (used / size * 100 if size else 0), size, used
+    inferred_size = 1_000_000 if "1m" in mid.lower() else 200_000
+    size = effective_context_window(inferred_size, data)
+    return min(100.0, used / size * 100 if size else 0), size, used
 
 # ---- Kimi Coding Plan quota (fallback when official rate_limits absent) ----
 _KIMI_CACHE = None  # tests may override; runtime caches are scoped by base URL and token
@@ -568,7 +616,7 @@ def main():
     data = read_input()
 
     # ---- model + effort ----
-    ctx = (context_from_claudish()
+    ctx = (context_from_claudish(data)
            or context_from_official(data)
            or context_from_transcript(data))
     model_seg = c(f"🤖 {fmt_model(data, ctx)}", "1;36")
