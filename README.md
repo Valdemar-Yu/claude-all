@@ -1,14 +1,14 @@
 # claude-all
 
-> 一个菜单管住所有 Claude Code 后端:官方 Claude、z.ai GLM、Sakana Fugu、第三方 GPT 中转(plbbl 等)。每路后端独立隔离,session 与 memory 共享。
+> 一个菜单管住五个常用 Claude Code 后端:官方 Claude、z.ai GLM、plbbl、DeepSeek、Kimi Coding Plan。每路后端独立隔离,session 与 memory 共享。
 >
-> **EN** — One menu for every Claude Code backend (official Claude, z.ai GLM, Sakana Fugu, third-party GPT relays like plbbl). Each backend runs in its own isolated config; sessions and memory stay shared. Install: `curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install.sh | bash`
+> **EN** — One menu for five Claude Code backends (official Claude, z.ai GLM, plbbl, DeepSeek, and Kimi Coding Plan). Each backend runs in its own isolated config; sessions and memory stay shared. Install: `curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install.sh | bash`
 
 [安装](#安装) · [用法](#用法) · [隔离原理](#环境隔离原理) · [Statusline](#statusline) · [样例:接 plbbl](#样例接-plbbl-这类-openai-中转) · [排错](docs/troubleshooting.md)
 
 ## 解决什么问题
 
-手上有好几路 Claude Code 后端:官方订阅、z.ai 的 GLM、Sakana Fugu、plbbl 这类第三方 GPT 中转。每路的后端地址、协议、凭据都不一样,而 Claude Code 启动时只认一套环境变量和一个配置目录。直接混用会互相打架:
+手上有好几路 Claude Code 后端:官方订阅、z.ai GLM、plbbl、DeepSeek、Kimi Coding Plan。每路的后端地址、协议、凭据都不一样,而 Claude Code 启动时只认一套环境变量和一个配置目录。直接混用会互相打架:
 
 - 官方 `~/.claude` 常被 CC Switch 之类工具写入 `ANTHROPIC_BASE_URL`,切到别的后端时没清干净,请求发去错的地址
 - 不同后端的 `.claude.json` 账户态、settings 互相覆盖
@@ -23,6 +23,17 @@ claude-all 给每路后端一个 **profile**(一个 env 文件),用方向键菜�
 - Add 向导交互式加新 API,凭据写进 600 权限的 env 文件
 - 默认共享官方 `~/.claude/projects`,可 resume 历史 session
 - 把踩过的坑封进库:claudish `oai` provider 绕开工具调用残缺、`.claude.json` 自动备份、CC Switch 污染防护
+- 安装时把通过 `claude --version` 的 CLI 固化为隔离 runtime；全局 Claude 更新损坏时，五个环境仍使用上一个健康版本
+
+当前保留的环境及模板：
+
+| profile | 协议/入口 | 模板 |
+|---|---|---|
+| `claude-plbbl` | OpenAI → claudish | [`profiles/claudish.env.example`](profiles/claudish.env.example) |
+| `claude-glm` | Anthropic 兼容 | [`profiles/glm.env.example`](profiles/glm.env.example) |
+| `claude` | 官方 Claude（隔离 CC Switch settings） | [`profiles/official.env.example`](profiles/official.env.example) |
+| `deepseek` | OpenAI → claudish | [`profiles/deepseek.env.example`](profiles/deepseek.env.example) |
+| `kimi-cc` | Anthropic 兼容 | [`profiles/kimi-cc.env.example`](profiles/kimi-cc.env.example) |
 
 ## 环境隔离原理
 
@@ -34,7 +45,7 @@ Claude Code 的全部运行状态都挂在 `$CLAUDE_CONFIG_DIR` 指向的目录�
 
 | launch 类型 | 适用后端 | claude-all 做什么 |
 |---|---|---|
-| `cmd` | 已有自带隔离的 wrapper(claude / claude-glm / claude-fugu / cc-gpt-plbbl) | 直接 exec 该 wrapper,隔离由 wrapper 自己负责 |
+| `cmd` | 已有自带隔离的 wrapper(claude / claude-glm / cc-gpt-plbbl) | 直接 exec 该 wrapper,隔离由 wrapper 自己负责 |
 | `direct` | Anthropic 兼容 API(有 `/v1/messages`,如 z.ai) | 设 `CLAUDE_CONFIG_DIR=~/.claude-all` + `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`,exec claude |
 | `claudish` | 仅 OpenAI 协议的中转(plbbl 等) | 设 config 目录 + `OPENAI_*`,exec claudish 做协议翻译 |
 
@@ -66,7 +77,24 @@ Claude Code 的全部运行状态都挂在 `$CLAUDE_CONFIG_DIR` 指向的目录�
 curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install.sh | bash
 ```
 
-install 会自动发现已有的 claude / claude-glm / claude-fugu / claude-plbbl wrapper,生成对应 `cmd` profile;plbbl 单实例的参数交互式填(plbbl 用户回车用默认)。或先 clone 再 `./install.sh`。
+install 会验证当前 Claude CLI，原子写入 `~/.local/share/claude-all/runtime/bin/claude`，为官方 Claude 生成隔离 CC Switch 的 `direct` profile，并为 claude-glm / claude-plbbl 生成 `cmd` profile；已有的 deepseek、kimi-cc 等用户 profile 不覆盖。plbbl 单实例的参数交互式填（plbbl 用户回车用默认）。或先 clone 再 `./install.sh`。
+
+### Claude 更新防护
+
+近期 Claude Code 的 npm 包使用平台原生二进制和 `postinstall`。如果后台/手动 npm 更新在下载或解包时中断，可能同时留下三个症状：全局 `claude` 入口消失、npm bin 目录出现 `.claude-随机串`、平台二进制被截断且在 macOS 上以 `Killed: 9` 退出。所有 profile 最终都依赖 Claude Code，所以旧版 claude-all 会一起失效。
+
+安装器现在会实际执行 `claude --version`，而不只检查命令名是否存在；验证通过后用硬链接（失败时复制）保留一个隔离 runtime，并用临时文件 + rename 原子刷新。所有 `direct`、`claudish` 和内置 `cmd` 路径启动前都会优先使用该 runtime。claude-all 默认设置 `DISABLE_AUTOUPDATER=1`；如确实需要在会话里允许后台更新，可显式设 `CLAUDE_ALL_ALLOW_AUTOUPDATE=1`。
+
+推荐手动更新并验证：
+
+```bash
+npm install -g @anthropic-ai/claude-code@stable
+claude --version
+./install.sh                  # 验证并原子刷新隔离 runtime
+claude-all doctor             # 检查 runtime、claudish 和全部 profile
+```
+
+若全局更新失败，已安装的隔离 runtime 不会被覆盖；修好全局 Claude 后重新运行安装器即可。
 
 非交互(脚本 / CI):
 
@@ -80,6 +108,7 @@ curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install
 ```bash
 claude-all                  # 环境菜单；claude-plbbl 固定在第一项
 claude-all list             # 列出全部 profile
+claude-all doctor           # 检查 runtime、依赖和全部 profile
 claude-all add              # 输入 base URL/key 后发现模型并配置三个角色
 claude-all claude-plbbl -i  # 跳过菜单直接启动，参数透传
 ```

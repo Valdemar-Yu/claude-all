@@ -25,6 +25,13 @@ fi
 source "$_LIB/config.sh"
 source "$_LIB/token.sh"
 source "$_LIB/context-window.sh"
+_PREFIX="$(cd -P "$_LIB/.." >/dev/null 2>&1 && pwd)"
+[ -f "$_LIB/claude-cli.sh" ] || { echo "[cc-gpt-plbbl] 缺少 lib/claude-cli.sh，请重新安装。" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$_LIB/claude-cli.sh"
+_CLAUDE_RUNTIME_DIR="${CLAUDE_ALL_RUNTIME_DIR:-$_PREFIX/runtime/bin}"
+_claude_all_activate_runtime "$_CLAUDE_RUNTIME_DIR" 2>/dev/null || true
+_claude_all_resolve_claude "$_CLAUDE_RUNTIME_DIR" >/dev/null || { _claude_all_claude_error; exit 1; }
 
 # 解析 token
 _ccgp_resolve_token || {
@@ -42,7 +49,6 @@ export "${_ENV_PREFIX}_BASE_URL=$CCGP_BASE_URL"
 export "${_ENV_PREFIX}_API_KEY=$CCGP_TOKEN"
 
 # claudish 会生成临时 --settings;通过 claude-all patch 显式换成统一 statusline。
-_PREFIX="$(cd -P "$_LIB/.." >/dev/null 2>&1 && pwd)"
 _STATUSLINE="$_PREFIX/statusline/statusline.py"
 if [ "$CCGP_STATUSLINE" = yes ] && [ -f "$_STATUSLINE" ] && [ -f "$_LIB/statusline.sh" ]; then
   # shellcheck source=/dev/null

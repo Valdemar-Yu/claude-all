@@ -64,6 +64,19 @@ printf '\n'
 SH
 chmod +x "$TMP/bin/claudish"
 
+cat > "$TMP/bin/claude" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = --version ]; then
+  printf '9.9.9 (Claude Code)\n'
+  exit 0
+fi
+printf 'CLAUDE ARGS='
+printf ' <%s>' "$@"
+printf '\n'
+SH
+chmod +x "$TMP/bin/claude"
+
 # 模型参数解析、窗口映射与 wrapper 实际导出。
 # shellcheck source=/dev/null
 source "$ROOT/lib/context-window.sh"

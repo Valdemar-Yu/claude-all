@@ -24,6 +24,13 @@ if [ -f "$_CONTEXT_WINDOW_LIB" ]; then
   # shellcheck source=/dev/null
   source "$_CONTEXT_WINDOW_LIB"
 fi
+_CLAUDE_CLI_LIB="$_PREFIX/lib/claude-cli.sh"
+[ -f "$_CLAUDE_CLI_LIB" ] || { echo "[claude-all] 缺少 lib/claude-cli.sh，请重新安装。" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$_CLAUDE_CLI_LIB"
+_CLAUDE_RUNTIME_DIR="${CLAUDE_ALL_RUNTIME_DIR:-$_PREFIX/runtime/bin}"
+_CLAUDE_ALL_BASE_PATH="$PATH"
+_claude_all_activate_runtime "$_CLAUDE_RUNTIME_DIR" 2>/dev/null || true
 
 PROFILES_DIR="${CLAUDE_ALL_PROFILES_DIR:-$HOME/.claude-all/profiles}"
 
@@ -301,7 +308,7 @@ _print_dry_env() {
 }
 
 launch() {
-  local profile="$1" main_model default_idx settings provider opus_model sonnet_model haiku_model
+  local profile="$1" main_model default_idx settings provider opus_model sonnet_model haiku_model claude_bin
   local context_model requested_model _residual _v _main_args=() _legacy_model_args=()
   shift
   _legacy_model_args=("$@")
@@ -422,18 +429,22 @@ launch() {
   case "$CLAUDE_ALL_LAUNCH" in
     cmd)
       [ -n "${CLAUDE_ALL_CMD:-}" ] || die "profile '$profile' 缺 CLAUDE_ALL_CMD"
+      command -v "$CLAUDE_ALL_CMD" >/dev/null 2>&1 || die "profile '$profile' 的命令不可用: $CLAUDE_ALL_CMD"
       exec "$CLAUDE_ALL_CMD" "$@"
       ;;
     direct)
       export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
+      claude_bin="$(_claude_all_resolve_claude "$_CLAUDE_RUNTIME_DIR")" || { _claude_all_claude_error; exit 1; }
       if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
-        exec claude --settings "$settings" ${_main_args[@]+"${_main_args[@]}"} "$@"
+        exec "$claude_bin" --settings "$settings" ${_main_args[@]+"${_main_args[@]}"} "$@"
       else
-        exec claude "$@"
+        exec "$claude_bin" "$@"
       fi
       ;;
     claudish)
       export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
+      _claude_all_resolve_claude "$_CLAUDE_RUNTIME_DIR" >/dev/null || { _claude_all_claude_error; exit 1; }
+      command -v claudish >/dev/null 2>&1 || die "没找到 claudish。安装: npm i -g claudish@latest"
       if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
         local _e=(); [ -n "${CLAUDE_ALL_EFFORT:-}" ] && _e=(--effort "$CLAUDE_ALL_EFFORT")
         exec claudish --model-opus "$opus_model" --model-sonnet "$sonnet_model" --model-haiku "$haiku_model" \
@@ -606,6 +617,7 @@ usage() {
 用法:
   claude-all                  弹出环境选择菜单
   claude-all list             列出全部 profile
+  claude-all doctor           检查隔离 runtime、依赖和全部 profile
   claude-all add              添加 API、发现模型并配置 agent 路由
   claude-all <name> [args..]  直接启动指定 profile，参数透传
 删除 profile: rm ~/.claude-all/profiles/<name>.env
@@ -613,11 +625,73 @@ EOF
   exit 2
 }
 
+doctor() {
+  local failures=0 runtime_version runtime_path external_path external_version p launch cmd profile_failures=0
+  runtime_path="$_CLAUDE_RUNTIME_DIR/claude"
+  if runtime_version="$(_claude_all_claude_version "$runtime_path")"; then
+    runtime_path="$(_claude_all_realpath "$runtime_path")"
+    printf 'Claude runtime: OK — %s — %s\n' "$runtime_version" "$runtime_path"
+  else
+    printf 'Claude runtime: FAIL — claude --version 未通过\n' >&2
+    failures=$(( failures + 1 ))
+  fi
+
+  external_path="$(PATH="$_CLAUDE_ALL_BASE_PATH" command -v claude 2>/dev/null || true)"
+  if [ -n "$external_path" ] && external_version="$(_claude_all_claude_version "$external_path")"; then
+    printf 'Global Claude CLI: OK — %s — %s\n' "$external_version" "$external_path"
+  else
+    printf 'Global Claude CLI: WARN — 缺失或损坏；隔离 runtime 仍可继续使用\n' >&2
+  fi
+
+  if [ "${#profiles[@]}" -eq 0 ]; then
+    printf '0 profile(s): FAIL — 没有 profile\n' >&2
+    failures=$(( failures + 1 ))
+  else
+    for p in "${profiles[@]}"; do
+      launch="$(_field "$p" CLAUDE_ALL_LAUNCH)"; launch="${launch:-direct}"
+      case "$launch" in
+        cmd)
+          cmd="$(_field "$p" CLAUDE_ALL_CMD)"
+          if [ -z "$cmd" ] || ! command -v "$cmd" >/dev/null 2>&1; then
+            printf 'Profile %s: FAIL — cmd 不可用: %s\n' "$p" "${cmd:-<empty>}" >&2
+            profile_failures=$(( profile_failures + 1 ))
+          fi
+          ;;
+        direct)
+          if ! _claude_all_resolve_claude "$_CLAUDE_RUNTIME_DIR" >/dev/null 2>&1; then
+            printf 'Profile %s: FAIL — Claude runtime 不可用\n' "$p" >&2
+            profile_failures=$(( profile_failures + 1 ))
+          fi
+          ;;
+        claudish)
+          if ! _claude_all_resolve_claude "$_CLAUDE_RUNTIME_DIR" >/dev/null 2>&1 || \
+             ! command -v claudish >/dev/null 2>&1; then
+            printf 'Profile %s: FAIL — Claude runtime 或 claudish 不可用\n' "$p" >&2
+            profile_failures=$(( profile_failures + 1 ))
+          fi
+          ;;
+        *)
+          printf 'Profile %s: FAIL — 未知 launch=%s\n' "$p" "$launch" >&2
+          profile_failures=$(( profile_failures + 1 ))
+          ;;
+      esac
+    done
+    if [ "$profile_failures" -eq 0 ]; then
+      printf '%d profile(s): OK\n' "${#profiles[@]}"
+    else
+      printf '%d profile(s): FAIL — %d 个错误\n' "${#profiles[@]}" "$profile_failures" >&2
+      failures=$(( failures + profile_failures ))
+    fi
+  fi
+  [ "$failures" -eq 0 ]
+}
+
 case "${1:-}" in
   list)
     [ "${#profiles[@]}" -gt 0 ] || die "没有 profile。跑 claude-all add 添加，或先 install。"
     for p in "${profiles[@]}"; do printf '  %s\n' "$(label_of "$p")"; done
     ;;
+  doctor) doctor ;;
   add) add_wizard ;;
   -h|--help) usage ;;
   "")
