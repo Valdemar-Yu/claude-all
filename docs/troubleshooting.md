@@ -2,6 +2,31 @@
 
 按症状查。每条:症状 → 根因 → 解法。
 
+## 所有环境同时无法启动 / `claude: command not found` / `Killed: 9`
+
+**根因**:五个 profile 最终都依赖同一份 Claude Code。npm 更新若在原生二进制下载、解包或原子 rename 阶段中断，可能留下 `.claude-随机串` / `.claude-code-随机串`，删掉正式 `claude` 入口，或留下被截断、无有效签名的 Mach-O；macOS 执行后通常是 `Killed: 9`。这不是某个 provider 的 token 或协议问题。
+
+**诊断**:
+
+```bash
+claude --version
+claude-all doctor
+npm list -g --depth=0 @anthropic-ai/claude-code
+```
+
+健康状态必须让 `claude --version` 打印版本。macOS 还可用 `codesign -dv --verbose=2 "$(command -v claude)"` 核对签名。只看到命令文件存在不代表二进制健康。
+
+**修复**:
+
+```bash
+npm install -g @anthropic-ai/claude-code@stable
+claude --version
+./install.sh
+claude-all doctor
+```
+
+若 npm 报 `ENOTEMPTY ... rename ... .claude-code-随机串`，说明上一次更新的 staging/backup 目录仍在；先确认其中不含用户数据并移走冲突目录，再重装。不要把随机隐藏入口直接当长期 `claude` 使用。安装器只会用通过版本检查的 CLI 原子刷新隔离 runtime，坏更新不会覆盖上一个健康版本。
+
 ## 403 This group does not allow /v1/messages dispatch
 
 **根因**:Claude Code 直连了中转的 Anthropic 端点。中转是纯 OpenAI 协议,禁用了 `/v1/messages`。通常是 `CLAUDE_CONFIG_DIR` 指向了被污染的 `~/.claude`(其 settings.json 的 `ANTHROPIC_BASE_URL` 覆盖了 claudish 代理)。
@@ -73,8 +98,8 @@ bash ~/.local/share/claude-all/lib/patch-claudish.sh --statusline-only
 
 然后重新启动会话。若是 direct/cmd profile，检查其 `$CLAUDE_CONFIG_DIR/settings.json` 的 `statusLine.command` 是否指向 `~/.local/share/claude-all/statusline/statusline.py`。
 
-## claude-all 里选 claude 走的不是想要的源
+## `claude` 官方环境提示 Not logged in
 
-**根因**:`claude` 是 cmd 型内置 profile,原样 exec 官方 CLI——它读 `~/.claude/settings.json` 里的 env,也就是 CC Switch 的当前源。claude-all 不管这块。
+**根因**:`claude` 内置 profile 现在使用隔离的 `~/.claude-all`，防止 `~/.claude/settings.json` 中的 CC Switch `ANTHROPIC_*` 把官方请求改发到第三方端点。macOS 的 OAuth 凭据由 Claude Code 保存在 Keychain；如果这台机器没有可用的官方登录态，隔离环境会明确提示登录。
 
-**解法**:去 CC Switch 切当前源;或 `claude-all add` 加一个 direct 型 profile(独立 env,不受 CC Switch 影响)。
+**解法**:运行 `claude-all claude` 后执行 `/login`。这是一次交互式 OAuth 登录，claude-all 不读取、复制或提交凭据。不要为了绕过登录把 CC Switch 的第三方 token 写回官方 profile。

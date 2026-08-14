@@ -2,7 +2,7 @@
 # claude-all 安装器(cc-gpt-plbbl 为兼容入口)。支持本地 clone 与 curl | bash。
 set -euo pipefail
 
-CCGP_VERSION="3.0.1"
+CCGP_VERSION="3.1.0"
 CCGP_REPO="${CCGP_REPO:-Valdemar-Yu/claude-all}"
 CCGP_REF="${CCGP_REF:-main}"
 
@@ -38,6 +38,10 @@ PREFIX="${CCGP_PREFIX:-$HOME/.local/share/claude-all}"
 BINDIR="${CCGP_BINDIR:-$HOME/.local/bin}"
 CONFIG_FILE="${CCGP_CONFIG_FILE:-$HOME/.config/claude-all/config}"
 ALLDIR="${CLAUDE_ALL_HOME:-$HOME/.claude-all}"
+_CLAUDE_CLI_LIB="$SELF_DIR/lib/claude-cli.sh"
+[ -f "$_CLAUDE_CLI_LIB" ] || die "安装包缺少 lib/claude-cli.sh"
+# shellcheck source=/dev/null
+source "$_CLAUDE_CLI_LIB"
 
 # ---- 1.5 迁移 cc-gpt-plbbl 旧命名空间路径(幂等) ----
 if [ -d "$HOME/.local/share/cc-gpt-plbbl" ]; then
@@ -86,10 +90,12 @@ _relink_entry "$BINDIR/cc-gpt-plbbl"
 _relink_entry "$BINDIR/claude-all"
 
 # ---- 1. 依赖检查 ----
-command -v claude   >/dev/null 2>&1 || die "没找到 claude CLI。先安装 Claude Code。"
+_claude_source="$(command -v claude 2>/dev/null || true)"
+[ -n "$_claude_source" ] || { _claude_all_claude_error; die "没找到 claude CLI。"; }
+_claude_version="$(_claude_all_claude_version "$_claude_source" 2>/dev/null || true)"
+[ -n "$_claude_version" ] || { _claude_all_claude_error; die "当前 claude CLI 健康检查失败。"; }
 command -v claudish >/dev/null 2>&1 || die "没找到 claudish。安装:npm i -g claudish@latest (要求 >=7.12)"
-command -v python3  >/dev/null 2>&1 || die "没找到 python3。统一 statusline 和 settings 合并需要 Python 3。"
-command -v python3  >/dev/null 2>&1 || die "没找到 python3。模型列表解析和安全配置写入需要 python3。"
+command -v python3  >/dev/null 2>&1 || die "没找到 python3。statusline、settings 合并、模型列表解析和安全 profile 写入需要 Python 3。"
 command -v curl     >/dev/null 2>&1 || die "没找到 curl。模型列表发现需要 curl。"
 command -v sqlite3  >/dev/null 2>&1 || warn "没找到 sqlite3：无法从 CC Switch 自动读取 token，需配置 CCGP_TOKEN/token/token_cmd。"
 
@@ -172,6 +178,9 @@ rm -rf "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/statusline"
 cp -R "$SELF_DIR/bin" "$SELF_DIR/lib" "$SELF_DIR/statusline" "$PREFIX/"
 chmod +x "$PREFIX/bin/cc-gpt-plbbl" "$PREFIX/bin/claude-all" \
   "$PREFIX/statusline/statusline.py" "$PREFIX/statusline/install.sh"
+_runtime_version="$(_claude_all_install_runtime "$_claude_source" "$PREFIX/runtime/bin")" \
+  || die "无法安装健康的隔离 Claude runtime；原 runtime（如有）已保留。"
+info "隔离 runtime:$PREFIX/runtime/bin/claude ($_runtime_version)"
 
 _link_entry() {
   local name="$1" target="$2" dest="$BINDIR/$1" current
@@ -242,26 +251,72 @@ _mk_builtin() {
   ) > "$ALLDIR/profiles/$name.env"
   chmod 600 "$ALLDIR/profiles/$name.env"
 }
-_claude_cmd="$(command -v claude)"
-_mk_builtin claude "$_claude_cmd" "Claude / CC Switch 当前源"
-command -v claude-glm  >/dev/null 2>&1 && _mk_builtin claude-glm  "$(command -v claude-glm)"  "GLM (z.ai)"
-command -v claude-fugu >/dev/null 2>&1 && _mk_builtin claude-fugu "$(command -v claude-fugu)" "Sakana Fugu (claudish)"
-_plbbl_cmd="$BINDIR/cc-gpt-plbbl"
-_mk_builtin claude-plbbl "$_plbbl_cmd" "plbbl GPT (claudish)"
-# 2.0 生成的内置 profile 可能仍指向安装前的旧 claude-plbbl wrapper；只迁移带内置标记的文件。
-_plbbl_profile="$ALLDIR/profiles/claude-plbbl.env"
-if [ -f "$_plbbl_profile" ] && grep -q 'claude-all 内置 profile' "$_plbbl_profile"; then
-  PROFILE="$_plbbl_profile" COMMAND="$_plbbl_cmd" python3 - <<'PY'
+_mk_official() {
+  local profile="$ALLDIR/profiles/claude.env"
+  [ -f "$profile" ] && return 0
+  (
+    umask 077
+    printf '# claude — claude-all 内置 profile(可改可删)\n'
+    printf 'CLAUDE_ALL_LAUNCH=direct\n'
+    printf 'CLAUDE_ALL_LABEL=%q\n' "Claude 官方 (隔离 CC Switch)"
+    printf 'CLAUDE_CONFIG_DIR=%q\n' "$ALLDIR"
+  ) > "$profile"
+  chmod 600 "$profile"
+}
+
+_update_official() {
+  local profile="$ALLDIR/profiles/claude.env"
+  [ -f "$profile" ] && grep -q 'claude-all 内置 profile' "$profile" || return 0
+  PROFILE="$profile" CONFIG_DIR="$ALLDIR" LABEL="Claude 官方 (隔离 CC Switch)" python3 - <<'PY'
 import os, re, shlex
 path = os.environ["PROFILE"]
-text = open(path).read()
+with open(path, encoding="utf-8", errors="surrogateescape") as handle:
+    text = handle.read()
+text = re.sub(r"^CLAUDE_ALL_LAUNCH=.*$", "CLAUDE_ALL_LAUNCH=direct", text, count=1, flags=re.M)
+text = re.sub(r"^CLAUDE_ALL_CMD=.*\n?", "", text, flags=re.M)
+label_line = "CLAUDE_ALL_LABEL=" + shlex.quote(os.environ["LABEL"])
+if re.search(r"^CLAUDE_ALL_LABEL=", text, flags=re.M):
+    text = re.sub(r"^CLAUDE_ALL_LABEL=.*$", label_line, text, count=1, flags=re.M)
+else:
+    text = text.rstrip("\n") + "\n" + label_line + "\n"
+config_line = "CLAUDE_CONFIG_DIR=" + shlex.quote(os.environ["CONFIG_DIR"])
+if re.search(r"^CLAUDE_CONFIG_DIR=", text, flags=re.M):
+    text = re.sub(r"^CLAUDE_CONFIG_DIR=.*$", config_line, text, count=1, flags=re.M)
+else:
+    text = text.rstrip("\n") + "\n" + config_line + "\n"
+with open(path, "w", encoding="utf-8", errors="surrogateescape") as handle:
+    handle.write(text)
+PY
+  chmod 600 "$profile"
+}
+
+_update_builtin_cmd() {
+  local name="$1" command="$2" profile="$ALLDIR/profiles/$1.env"
+  [ -f "$profile" ] && grep -q 'claude-all 内置 profile' "$profile" || return 0
+  PROFILE="$profile" COMMAND="$command" python3 - <<'PY'
+import os, re, shlex
+path = os.environ["PROFILE"]
+with open(path, encoding="utf-8", errors="surrogateescape") as handle:
+    text = handle.read()
 line = "CLAUDE_ALL_CMD=" + shlex.quote(os.environ["COMMAND"])
 text, count = re.subn(r"^CLAUDE_ALL_CMD=.*$", line, text, count=1, flags=re.M)
 if count:
-    open(path, "w").write(text)
+    with open(path, "w", encoding="utf-8", errors="surrogateescape") as handle:
+        handle.write(text)
 PY
-  chmod 600 "$_plbbl_profile"
+  chmod 600 "$profile"
+}
+
+_mk_official
+_update_official
+if command -v claude-glm >/dev/null 2>&1; then
+  _glm_cmd="$(command -v claude-glm)"
+  _mk_builtin claude-glm "$_glm_cmd" "GLM (z.ai)"
+  _update_builtin_cmd claude-glm "$_glm_cmd"
 fi
+_plbbl_cmd="$BINDIR/cc-gpt-plbbl"
+_mk_builtin claude-plbbl "$_plbbl_cmd" "plbbl GPT (claudish)"
+_update_builtin_cmd claude-plbbl "$_plbbl_cmd"
 info "多环境配置:${ALLDIR}；用户自建 profiles 不覆盖"
 
 # ---- 7. 写单环境配置，保留已有 token/token_cmd ----
