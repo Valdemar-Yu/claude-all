@@ -103,3 +103,57 @@ bash ~/.local/share/claude-all/lib/patch-claudish.sh --statusline-only
 **根因**:`claude` 内置 profile 现在使用隔离的 `~/.claude-all`，防止 `~/.claude/settings.json` 中的 CC Switch `ANTHROPIC_*` 把官方请求改发到第三方端点。macOS 的 OAuth 凭据由 Claude Code 保存在 Keychain；如果这台机器没有可用的官方登录态，隔离环境会明确提示登录。
 
 **解法**:运行 `claude-all claude` 后执行 `/login`。这是一次交互式 OAuth 登录，claude-all 不读取、复制或提交凭据。不要为了绕过登录把 CC Switch 的第三方 token 写回官方 profile。
+
+## Baton 没有出现在菜单 / `claude-all baton` 提示未安装
+
+**根因**:`CCGP_BATON=auto` 只在安装器检测到 `codex` CLI 时安装 Baton。Baton 还需要官方 Claude 订阅和已经登录的 Codex CLI。
+
+**诊断**:
+
+```bash
+command -v codex
+codex --version
+claude-all doctor
+```
+
+doctor 的 Baton 段会显示 CLI 路径和来源、Codex 是否可用以及受管 config 的 `skills/baton` 链接。Baton 是可选组件，缺失只会给出 WARN，不会让其他 profile 的 doctor 失败。
+
+**修复**:
+
+```bash
+CCGP_BATON=yes ./install.sh
+claude-all baton "检查当前任务"
+```
+
+`claude-all baton` 只使用官方 profile，并传 `--model opus`。缺少官方 `claude.env` 时重新运行 `./install.sh`，缺少 Codex 时先登录 Codex。若安装时不需要 Baton，设置 `CCGP_BATON=no`。
+
+## Baton 项目看不到 Codex 额度行
+
+**根因**:项目没有运行 `baton init`，或项目运行了 `baton init --no-statusline`。claudish 还会用临时 `--settings` 覆盖项目 statusline，claude-all 需要通过自己的分发器确认项目级 Baton 设置。
+
+**诊断**:
+
+```bash
+baton doctor
+claude-all doctor
+```
+
+如果项目确实需要额度行，在项目根目录运行 `baton init` 后重开会话。分发器只接受 realpath 指向全局或 vendored Baton 的固定脚本命令，普通项目、解析失败或不受信任的同名脚本都会回退原 claude-all statusline。
+
+**撤销**:
+
+```bash
+baton statusline uninstall
+```
+
+项目级 statusline 由 Baton 管理，先撤销它再运行 claude-all 的 `./uninstall.sh`。卸载器会保留用户自装的 Baton、council、普通目录和清单外软链。
+
+## 需要同步上游 Baton
+
+vendor 版本的仓库、commit 和补丁清单在 `baton/UPSTREAM`。给同步脚本一个本地 Baton checkout，它只读 Git 跟踪文件，工作区有未提交改动会拒绝同步：
+
+```bash
+scripts/sync-baton.sh --check /path/to/Baton
+```
+
+确认差异后再去掉 `--check` 写入 vendor。同步不会联网安装第三方 council.skill；若本机还没有 council，安装输出会提示运行 `~/.local/share/claude-all/baton/install.sh --council`，自定义 `CCGP_PREFIX` 时把前缀替换成对应目录。这一步会联网 clone 第三方仓库。

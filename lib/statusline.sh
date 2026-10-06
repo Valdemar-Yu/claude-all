@@ -8,6 +8,13 @@ print("python3 " + shlex.quote(os.environ["STATUSLINE_PATH"]), end="")
 PY
 }
 
+_claude_all_statusline_dispatch_command() {
+  STATUSLINE_PATH="$1/statusline/dispatch.py" python3 - <<'PY'
+import os, shlex
+print("python3 " + shlex.quote(os.environ["STATUSLINE_PATH"]), end="")
+PY
+}
+
 _claude_all_statusline_install() {
   local config_dir="$1" command="$2" settings="$1/settings.json"
   mkdir -p "$config_dir"
