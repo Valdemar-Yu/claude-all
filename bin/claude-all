@@ -13,10 +13,20 @@ _SELF_DIR="$(cd -P "$(dirname "$_SOURCE")" >/dev/null 2>&1 && pwd)"
 _PREFIX="$(cd -P "$_SELF_DIR/.." >/dev/null 2>&1 && pwd)"
 _STATUSLINE="$_PREFIX/statusline/statusline.py"
 _STATUSLINE_COMMAND=""
+_STATUSLINE_DISPATCH_COMMAND=""
 if [ -f "$_PREFIX/lib/statusline.sh" ]; then
   # shellcheck source=/dev/null
   source "$_PREFIX/lib/statusline.sh"
   _STATUSLINE_COMMAND="$(_claude_all_statusline_command "$_PREFIX")"
+  if [ -f "$_PREFIX/statusline/dispatch.py" ]; then
+    _STATUSLINE_DISPATCH_COMMAND="$(_claude_all_statusline_dispatch_command "$_PREFIX")"
+  fi
+fi
+CLAUDE_ALL_BATON_PREFIX="$_PREFIX"
+if [ -f "$_PREFIX/lib/baton.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$_PREFIX/lib/baton.sh"
+  _claude_all_baton_init
 fi
 _MODEL_CATALOG="$_PREFIX/lib/model-catalog.sh"
 _CONTEXT_WINDOW_LIB="$_PREFIX/lib/context-window.sh"
@@ -33,6 +43,8 @@ _CLAUDE_ALL_BASE_PATH="$PATH"
 _claude_all_activate_runtime "$_CLAUDE_RUNTIME_DIR" 2>/dev/null || true
 
 PROFILES_DIR="${CLAUDE_ALL_PROFILES_DIR:-$HOME/.claude-all/profiles}"
+CLAUDE_ALL_HOME_DIR="${CLAUDE_ALL_HOME:-$HOME/.claude-all}"
+CCGP_MANAGED_CONFIG_DIR="${CCGP_CONFIG_DIR:-$HOME/.claude-plbbl}"
 
 c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
 info() { echo "$(c '1;36' '[claude-all]') $*"; }
@@ -309,7 +321,7 @@ _print_dry_env() {
 
 launch() {
   local profile="$1" main_model default_idx settings provider opus_model sonnet_model haiku_model claude_bin
-  local context_model requested_model _residual _v _main_args=() _legacy_model_args=()
+  local context_model requested_model managed_config_dir _expanded_config_dir _residual _v _main_args=() _legacy_model_args=()
   shift
   _legacy_model_args=("$@")
 
@@ -328,6 +340,18 @@ launch() {
   : "${CLAUDE_ALL_LAUNCH:=direct}"
   : "${CLAUDE_ALL_STATUSLINE:=${CCGP_STATUSLINE:-yes}}"
 
+  managed_config_dir=""
+  if [ "$CLAUDE_ALL_LAUNCH" != cmd ]; then
+    managed_config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude-all}"
+    if command -v _baton_expand_config_dir >/dev/null 2>&1; then
+      _expanded_config_dir="$(_baton_expand_config_dir "$managed_config_dir" 2>/dev/null || true)"
+      [ -n "$_expanded_config_dir" ] && managed_config_dir="$_expanded_config_dir" && CLAUDE_CONFIG_DIR="$_expanded_config_dir"
+    fi
+  fi
+  if [ "$CLAUDE_ALL_LAUNCH" != cmd ] && command -v _claude_all_baton_link_config >/dev/null 2>&1; then
+    _claude_all_baton_link_config "$managed_config_dir" || true
+  fi
+
   if [ "${CLAUDE_ALL_SCHEMA:-1}" = 2 ]; then
     _profile_models
     default_idx="$(_model_index "${CLAUDE_ALL_DEFAULT_MODEL:-}" "${PROFILE_MODELS[@]}")"
@@ -345,7 +369,11 @@ launch() {
 
   if [ "$CLAUDE_ALL_LAUNCH" = claudish ] && [ "${CLAUDE_ALL_STATUSLINE:-yes}" = yes ] \
       && [ -n "$_STATUSLINE_COMMAND" ]; then
-    export CLAUDISH_STATUSLINE_COMMAND="$_STATUSLINE_COMMAND"
+    if [ -n "$_STATUSLINE_DISPATCH_COMMAND" ]; then
+      export CLAUDISH_STATUSLINE_COMMAND="$_STATUSLINE_DISPATCH_COMMAND"
+    else
+      export CLAUDISH_STATUSLINE_COMMAND="$_STATUSLINE_COMMAND"
+    fi
     export CLAUDISH_STATUSLINE_REFRESH=60
   fi
 
@@ -570,10 +598,27 @@ add_wizard() {
 }
 
 choose_menu() {
-  local total=$(( ${#profiles[@]} + 1 )) add_idx=$(( ${#profiles[@]} ))
-  local selected=0 rendered=0 menu_lines=$(( total + 3 )) key rest index label mark prefix input
+  local baton_idx=-1 add_idx=${#profiles[@]} total selected=0 rendered=0 menu_lines key rest index label mark prefix input
+  local _menu_baton_cli _menu_baton_source
+  _menu_baton_cli="$(_claude_all_baton_cli 2>/dev/null || true)"
+  _menu_baton_source="$(_claude_all_baton_cli_source 2>/dev/null || true)"
+  if [ -f "$PROFILES_DIR/claude.env" ] && [ -n "$_menu_baton_cli" ] \
+    && [ "$_menu_baton_source" != invalid ] && [ "$_menu_baton_source" != missing ]; then
+    baton_idx="$add_idx"
+    add_idx=$(( add_idx + 1 ))
+  fi
+  total=$(( add_idx + 1 ))
+  menu_lines=$(( total + 3 ))
 
-  _item_label() { [ "$1" -eq "$add_idx" ] && printf '[+ Add new API]' || label_of "${profiles[$1]}"; }
+  _item_label() {
+    if [ "$1" -eq "$baton_idx" ]; then
+      printf 'Baton（Opus 指挥 · Codex 执行）'
+    elif [ "$1" -eq "$add_idx" ]; then
+      printf '[+ Add new API]'
+    else
+      label_of "${profiles[$1]}"
+    fi
+  }
   _render_main_menu() {
     [ "$rendered" -eq 1 ] && printf '\033[%dA\033[J' "$menu_lines"
     rendered=1
@@ -592,7 +637,8 @@ choose_menu() {
     read -r -p '选择 [1]: ' input; input="${input:-1}"
     case "$input" in q|Q) echo '取消'; exit 0 ;; *[!0-9]*) die "无效选择:$input" ;; esac
     [ "$input" -ge 1 ] 2>/dev/null && [ "$input" -le "$total" ] 2>/dev/null || die "无效选择:$input"
-    [ "$input" -eq "$total" ] && return 2
+    [ "$input" -eq $(( baton_idx + 1 )) ] && [ "$baton_idx" -ge 0 ] && return 3
+    [ "$input" -eq $(( add_idx + 1 )) ] && return 2
     SELECTED_PROFILE="${profiles[$(( input - 1 ))]}"; return 0
   fi
 
@@ -608,8 +654,31 @@ choose_menu() {
     _render_main_menu
   done
   printf '\033[?25h\n'; trap - INT TERM
+  [ "$selected" -eq "$baton_idx" ] && [ "$baton_idx" -ge 0 ] && return 3
   [ "$selected" -eq "$add_idx" ] && return 2
   SELECTED_PROFILE="${profiles[$selected]}"
+}
+
+baton_quick_check() {
+  local cli source
+  command -v _claude_all_baton_cli >/dev/null 2>&1 || die "当前安装没有 Baton；请重新安装或设置 CCGP_BATON=yes。"
+  cli="$(_claude_all_baton_cli 2>/dev/null || true)"
+  [ -n "$cli" ] && [ -x "$cli" ] || die "当前安装没有可执行的 Baton CLI；请安装 Baton。"
+  source="$(_claude_all_baton_cli_source 2>/dev/null || true)"
+  [ "$source" = vendored ] || [ "$source" = user ] || die "PATH 上的 baton 不是 Baton：$cli"
+  command -v codex >/dev/null 2>&1 || die "Baton 需要 PATH 上可用的 codex CLI；请安装并登录 Codex。"
+  [ -f "$PROFILES_DIR/claude.env" ] || die "缺少官方 Claude profile：$PROFILES_DIR/claude.env；请重新运行 ./install.sh（或 README 中的 curl 安装命令）。"
+}
+
+baton_start() {
+  local task=""
+  baton_quick_check
+  if [ "$#" -gt 0 ]; then task="/baton $*"; fi
+  if [ -n "$task" ]; then
+    launch claude --model opus "$task"
+  else
+    launch claude --model opus
+  fi
 }
 
 usage() {
@@ -619,6 +688,7 @@ usage() {
   claude-all list             列出全部 profile
   claude-all doctor           检查隔离 runtime、依赖和全部 profile
   claude-all add              添加 API、发现模型并配置 agent 路由
+  claude-all baton [任务...]  用官方 Claude Opus 指挥 Baton、Codex 执行
   claude-all <name> [args..]  直接启动指定 profile，参数透传
 删除 profile: rm ~/.claude-all/profiles/<name>.env
 EOF
@@ -626,7 +696,7 @@ EOF
 }
 
 doctor() {
-  local failures=0 runtime_version runtime_path external_path external_version p launch cmd profile_failures=0
+  local failures=0 runtime_version runtime_path external_path external_version p launch cmd baton_cli _baton_cli_source profile_failures=0
   runtime_path="$_CLAUDE_RUNTIME_DIR/claude"
   if runtime_version="$(_claude_all_claude_version "$runtime_path")"; then
     runtime_path="$(_claude_all_realpath "$runtime_path")"
@@ -683,10 +753,71 @@ doctor() {
       failures=$(( failures + profile_failures ))
     fi
   fi
+  printf 'Baton:\n'
+  if command -v _claude_all_baton_cli >/dev/null 2>&1 && baton_cli="$(_claude_all_baton_cli 2>/dev/null || true)" && [ -n "$baton_cli" ]; then
+    _baton_cli_source="$(_claude_all_baton_cli_source 2>/dev/null || true)"
+    if [ "$_baton_cli_source" = invalid ]; then
+      printf 'Baton CLI: WARN — PATH 上的 baton 不是 Baton：%s\n' "$baton_cli"
+    else
+      printf 'Baton CLI: OK — %s — %s\n' "$_baton_cli_source" "$baton_cli"
+    fi
+  else
+    printf 'Baton CLI: WARN — 未安装（可选组件）\n'
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    printf 'Baton Codex CLI: OK — %s\n' "$(command -v codex)"
+  else
+    printf 'Baton Codex CLI: WARN — 未找到（Baton baton 子命令不可用）\n'
+  fi
+  if command -v _claude_all_baton_managed_config_dirs >/dev/null 2>&1; then
+    local _baton_cfg _baton_link _baton_target _baton_cli_ready=0
+    if [ -n "${baton_cli:-}" ] && [ "${_baton_cli_source:-}" != missing ] && [ "${_baton_cli_source:-}" != invalid ]; then
+      _baton_cli_ready=1
+    fi
+    if [ "$_baton_cli_ready" -eq 0 ]; then
+      printf 'Baton skill links: WARN — Baton 未安装，跳过链接检查\n'
+    fi
+    while IFS= read -r _baton_cfg; do
+      [ -n "$_baton_cfg" ] || continue
+      [ "$_baton_cli_ready" -eq 1 ] || continue
+      _baton_link="$_baton_cfg/skills/baton"
+      if [ -L "$_baton_link" ]; then
+        _baton_target="$(readlink "$_baton_link" 2>/dev/null || true)"
+        if [ "$_baton_target" = "$CLAUDE_ALL_BATON_GLOBAL_SKILL" ]; then
+          printf 'Baton skill link: OK — %s → %s\n' "$_baton_cfg" "$_baton_target"
+        else
+          printf 'Baton skill link: WARN — %s → %s（期望全局入口）\n' "$_baton_cfg" "${_baton_target:-<empty>}"
+        fi
+      elif [ -e "$_baton_link" ]; then
+        printf 'Baton skill link: WARN — %s/skills/baton 是已有文件或目录\n' "$_baton_cfg"
+      else
+        printf 'Baton skill link: WARN — %s/skills/baton 缺失\n' "$_baton_cfg"
+      fi
+      if [ -e "$CLAUDE_ALL_BATON_GLOBAL_COUNCIL" ] || [ -L "$CLAUDE_ALL_BATON_GLOBAL_COUNCIL" ]; then
+        _baton_link="$_baton_cfg/skills/council"
+        if [ -L "$_baton_link" ]; then
+          _baton_target="$(readlink "$_baton_link" 2>/dev/null || true)"
+          if [ "$_baton_target" = "$CLAUDE_ALL_BATON_GLOBAL_COUNCIL" ]; then
+            printf 'Baton council link: OK — %s → %s\n' "$_baton_cfg" "$_baton_target"
+          else
+            printf 'Baton council link: WARN — %s → %s（期望全局入口）\n' "$_baton_cfg" "${_baton_target:-<empty>}"
+          fi
+        elif [ -e "$_baton_link" ]; then
+          printf 'Baton council link: WARN — %s/skills/council 是已有文件或目录\n' "$_baton_cfg"
+        else
+          printf 'Baton council link: WARN — %s/skills/council 缺失\n' "$_baton_cfg"
+        fi
+      fi
+    done < <(_claude_all_baton_managed_config_dirs "$CLAUDE_ALL_HOME_DIR" "$CCGP_MANAGED_CONFIG_DIR" "$PROFILES_DIR")
+  fi
   [ "$failures" -eq 0 ]
 }
 
 case "${1:-}" in
+  baton)
+    shift
+    baton_start "$@"
+    ;;
   list)
     [ "${#profiles[@]}" -gt 0 ] || die "没有 profile。跑 claude-all add 添加，或先 install。"
     for p in "${profiles[@]}"; do printf '  %s\n' "$(label_of "$p")"; done
@@ -697,7 +828,12 @@ case "${1:-}" in
   "")
     [ "${#profiles[@]}" -gt 0 ] || die "没有 profile（~/.claude-all/profiles 为空）。跑 claude-all add 添加。"
     SELECTED_PROFILE=""
-    choose_menu || { rc=$?; [ "$rc" -eq 2 ] && { add_wizard; exit 0; }; exit "$rc"; }
+    choose_menu || {
+      rc=$?
+      if [ "$rc" -eq 2 ]; then add_wizard; exit 0; fi
+      if [ "$rc" -eq 3 ]; then baton_start; exit $?; fi
+      exit "$rc"
+    }
     launch "$SELECTED_PROFILE"
     ;;
   *)

@@ -1,10 +1,10 @@
 # claude-all
 
-> 一个菜单管住五个常用 Claude Code 后端:官方 Claude、z.ai GLM、plbbl、DeepSeek、Kimi Coding Plan。每路后端独立隔离,session 与 memory 共享。
+> 一个菜单管多个 Claude Code 后端；Baton 让官方 Claude 用 Opus 指挥、Codex 执行任务。每路后端独立隔离,session 与 memory 共享。
 >
-> **EN** — One menu for five Claude Code backends (official Claude, z.ai GLM, plbbl, DeepSeek, and Kimi Coding Plan). Each backend runs in its own isolated config; sessions and memory stay shared. Install: `curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install.sh | bash`
+> **EN** — One menu for multiple Claude Code backends, plus Baton with official Claude Opus directing Codex execution. Each backend runs in its own isolated config; sessions and memory stay shared. Install: `curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install.sh | bash`
 
-[安装](#安装) · [用法](#用法) · [隔离原理](#环境隔离原理) · [Statusline](#statusline) · [样例:接 plbbl](#样例接-plbbl-这类-openai-中转) · [排错](docs/troubleshooting.md)
+[安装](#安装) · [用法](#用法) · [Baton](#baton) · [隔离原理](#环境隔离原理) · [Statusline](#statusline) · [样例:接 plbbl](#样例接-plbbl-这类-openai-中转) · [排错](docs/troubleshooting.md)
 
 ## 解决什么问题
 
@@ -24,6 +24,7 @@ claude-all 给每路后端一个 **profile**(一个 env 文件),用方向键菜�
 - 默认共享官方 `~/.claude/projects`,可 resume 历史 session
 - 把踩过的坑封进库:claudish `oai` provider 绕开工具调用残缺、`.claude.json` 自动备份、CC Switch 污染防护
 - 安装时把通过 `claude --version` 的 CLI 固化为隔离 runtime；全局 Claude 更新损坏时，五个环境仍使用上一个健康版本
+- 安装时可选带上 Baton，让官方 Claude Opus 负责指挥，Codex CLI 负责执行
 
 当前保留的环境及模板：
 
@@ -67,6 +68,7 @@ Claude Code 的全部运行状态都挂在 `$CLAUDE_CONFIG_DIR` 指向的目录�
 ## 前置
 
 - Claude Code CLI
+- 官方 Claude 订阅，以及已经登录的 Codex CLI（Baton 模式需要）
 - Python 3 + curl：模型列表发现、JSON 解析和安全 profile 写入
 - Node.js + claudish:`npm i -g claudish`（>= 7.12），仅 OpenAI 协议 profile 需要
 - macOS 或 Linux
@@ -77,7 +79,7 @@ Claude Code 的全部运行状态都挂在 `$CLAUDE_CONFIG_DIR` 指向的目录�
 curl -fsSL https://raw.githubusercontent.com/Valdemar-Yu/claude-all/main/install.sh | bash
 ```
 
-install 会验证当前 Claude CLI，原子写入 `~/.local/share/claude-all/runtime/bin/claude`，为官方 Claude 生成隔离 CC Switch 的 `direct` profile，并为 claude-glm / claude-plbbl 生成 `cmd` profile；已有的 deepseek、kimi-cc 等用户 profile 不覆盖。plbbl 单实例的参数交互式填（plbbl 用户回车用默认）。或先 clone 再 `./install.sh`。
+install 会验证当前 Claude CLI，原子写入 `~/.local/share/claude-all/runtime/bin/claude`，为官方 Claude 生成隔离 CC Switch 的 `direct` profile，并为 claude-glm / claude-plbbl 生成 `cmd` profile；已有的 deepseek、kimi-cc 等用户 profile 不覆盖。检测到 `codex` 时默认安装 Baton；没有 Codex 时跳过并提示，强制安装可设 `CCGP_BATON=yes`，关闭可设 `CCGP_BATON=no`。plbbl 单实例的参数交互式填（plbbl 用户回车用默认）。或先 clone 再 `./install.sh`。
 
 ### Claude 更新防护
 
@@ -111,11 +113,30 @@ claude-all list             # 列出全部 profile
 claude-all doctor           # 检查 runtime、依赖和全部 profile
 claude-all add              # 输入 base URL/key 后发现模型并配置三个角色
 claude-all claude-plbbl -i  # 跳过菜单直接启动，参数透传
+claude-all baton "实现一个任务"  # 官方 Claude Opus 指挥 Baton，Codex 执行
 ```
 
 `add` 会读取该连接的 Models API，显示 `data[].id` 多选菜单，然后分别选择默认主模型、subagent 模型和 Agent Team teammate 模型。一个 API 仍只占一个环境菜单项；profile 保留多个候选主模型时，启动后会出现二级模型菜单，默认模型直接回车即可。Models API 列表只表示服务端声明模型存在，不代表 claude-all 已逐个发送推理请求。列表接口不可用时可手动输入模型 ID。
 
 Anthropic 协议生成 `direct` profile；OpenAI 协议生成 `claudish` profile。删一个后端就是 `rm ~/.claude-all/profiles/<name>.env`。模板见 [`profiles/`](profiles/)。菜单交互思路借鉴 [WaldronZ/scripts](https://github.com/WaldronZ/scripts)。
+
+## Baton
+
+### Opus 指挥、Codex 执行
+
+Baton 是同作者的开源协作工具。`claude-all baton "任务描述"` 用官方 Claude profile 启动并固定 `--model opus`，首条消息是 `/baton 任务描述`，再由 Baton 调度 Codex CLI 执行。不带任务运行 `claude-all baton` 时只启动 Opus 会话，随后在会话里输入 `/baton <任务描述>`；安装器只检测 PATH 上是否有 `codex` 命令，真正执行任务前需要已经登录的 Codex CLI。官方 profile 首次启动若提示未登录，请在会话里运行 `/login`。
+
+安装器把上游 Baton vendor 到 `~/.local/share/claude-all/baton`，并优先复用它的安装脚本。默认 `CCGP_BATON=auto` 只在检测到 `codex` 时安装，`CCGP_BATON=yes` 强制安装，`CCGP_BATON=no` 完全跳过。Baton skill 的全局入口是 `~/.claude/skills/baton`，claude-all 管理的 `~/.claude-all`、`~/.claude-plbbl` 和 profile 声明的 config 目录只链接这个入口，所以各环境看到的是同一份 skill；用户已有的同名文件或目录会保留。菜单里的 Baton 项会追加在现有 profile 后面，`claude-plbbl` 仍是第一项。
+
+项目运行 `baton init` 后，direct 环境直接使用项目级 Baton statusline。claudish 会用临时 `--settings` 覆盖项目设置，claude-all 因此把 claudish 的 statusline 命令交给分发入口，确认项目的设置确实指向受信任 Baton 脚本后再渲染 Codex 额度；普通项目和 `baton init --no-statusline` 项目只显示原有 statusline。分发器不执行项目设置里的命令字符串，只运行确认过的全局或 vendored Baton 脚本；额度数据来自 Baton 的缓存。
+
+卸载 claude-all 只删除自己清单记录的 Baton 链接和 vendored 安装，用户自装的 Baton、council 以及项目里的 Baton 配置保留。项目若要移除自己的额度行，先在项目目录运行 `baton statusline uninstall`，再运行 `./uninstall.sh`。上游关系保持 vendor 边界，源 checkout 可用下面的命令同步并检查跟踪文件：
+
+```bash
+scripts/sync-baton.sh --check /path/to/Baton
+```
+
+上游仓库是 [Valdemar-Yu/Baton](https://github.com/Valdemar-Yu/Baton)，当前 commit 和补丁清单见 [`baton/UPSTREAM`](baton/UPSTREAM)。
 
 ## Agent 与 Agent Team 模型
 

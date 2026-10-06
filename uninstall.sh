@@ -6,11 +6,18 @@ PREFIX="$HOME/.local/share/claude-all"
 BINDIR="$HOME/.local/bin"
 CFGDIR="$HOME/.claude-plbbl"
 TS="$(date +%s 2>/dev/null || echo bak)"
+CLAUDE_ALL_BATON_PREFIX="$PREFIX"
 
 c() { printf '\033[%sm%s\033[0m' "$1" "$2"; }
 info() { echo "$(c '1;36' '[claude-all]') $*"; }
 
 info "卸载..."
+if [ -f "$PREFIX/lib/baton.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$PREFIX/lib/baton.sh"
+  _claude_all_baton_uninstall_links
+  info "已移除 claude-all 清单中仍归属本安装的 Baton 链接"
+fi
 if [ -f "$PREFIX/lib/statusline.sh" ]; then
   # shellcheck source=/dev/null
   source "$PREFIX/lib/statusline.sh"
@@ -31,4 +38,5 @@ fi
 
 info "完成。配置文件 ~/.config/claude-all/config 保留(手动删:rm -rf ~/.config/claude-all)。"
 info "~/.claude-all 多环境目录与官方 ~/.claude 未受影响(单独清理:rm -rf ~/.claude-all)。"
+info "项目里的 Baton statusline 不由卸载器修改；需要时先运行 baton statusline uninstall。"
 info "注:install 时对 claudish 的 patch(若有)未还原,备份在 claudish 包内 dist/index.js.claude-all-bak,无害。"

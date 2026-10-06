@@ -48,3 +48,15 @@ claudish 的 `litellm` provider 是通用兼容层,工具调用(tool_use)翻译�
 `direct` profile 从对应 `$CLAUDE_CONFIG_DIR/settings.json` 读取统一脚本。`cmd` profile 由外部 wrapper 自己的 config 目录读取；安装时可用 `CCGP_STATUSLINE_GLOBAL=1` 同时配置 `~/.claude` 和 `~/.claude-glm`。`claudish` 会生成临时 `--settings` 并覆盖用户 statusLine，所以 claude-all 给 claudish 加一个幂等 patch，使 `CLAUDISH_STATUSLINE_COMMAND` 和 `CLAUDISH_STATUSLINE_REFRESH` 能替换它的内置命令。
 
 账号池口令不经过 profile env，也不写进 settings。macOS 上由状态栏进程按配置的 service 从 Keychain 读取，只用于 HTTPS Cookie。
+
+### Baton 的安装和跨环境链接
+
+安装器把上游 Baton 的 `skills/baton/`、`council/` 和安装脚本复制到 `$PREFIX/baton`。检测到 Codex CLI 时，默认 `CCGP_BATON=auto` 安装；`CCGP_BATON=yes` 强制安装，`CCGP_BATON=no` 跳过。Baton 自己的安装逻辑负责创建 `~/.claude/skills/baton` 和 `~/.local/bin/baton`，claude-all 只在自己的 manifest 中记录由自己创建的链接。
+
+`~/.claude-all`、`CCGP_CONFIG_DIR` 默认的 `~/.claude-plbbl` 和 profile 中声明的 `CLAUDE_CONFIG_DIR` 都只建立 `skills/baton` 到 `~/.claude/skills/baton` 的软链，council 已安装时同理。这样每个受管环境通过同一个全局入口看到实际使用的 Baton，用户已有普通目录、软链和外部 wrapper 不会被替换。每次 direct 或 claudish profile 启动时会再次幂等补链，覆盖后来新增的 profile。
+
+`claude-all baton` 只使用官方 `claude.env` profile，并显式传 `--model opus`。它快速检查 Baton CLI、Codex CLI 和官方 profile，不启动耗时 doctor。菜单检测到可用 Baton 时追加同一个入口。doctor 把 Baton 当可选组件，报告 CLI 来源、Codex 和各受管 config 的链接，缺失不会改变原有失败计数。
+
+claudish 的临时 `--settings` 优先级高于项目 `.claude/settings.local.json`，因此 claudish profile 的 `CLAUDISH_STATUSLINE_COMMAND` 指向 claude-all 的分发器。分发器只把项目 settings 当作 Baton 开关，解析后确认脚本 realpath 是全局或 vendored Baton，再以 `shell=False` 执行固定参数；解析失败或普通项目都回退原 claude-all statusline。direct 由项目级 Baton wrapper 直接追加一行 Codex 额度，`baton init --no-statusline` 不会追加。
+
+卸载器只删除 manifest 里仍与记录相符的 claude-all 软链和 vendored 安装，不删除用户自装 Baton、council 或项目 `.baton` 文件。项目级 statusline 属于 Baton 自己的状态，需在项目目录运行 `baton statusline uninstall` 后再卸载 claude-all。vendor 来源和上游 commit 记录在 `baton/UPSTREAM`，`scripts/sync-baton.sh --check <Baton checkout>` 只比较上游 Git 跟踪文件。

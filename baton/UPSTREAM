@@ -1,0 +1,6 @@
+repository: https://github.com/Valdemar-Yu/Baton
+commit: 91f5d2c3d8c721a517890687b9cdd8c4d23a60bd
+synced_at: 2026-10-06
+
+Local patches:
+- None. Vendored files under baton/ match the tracked upstream checkout at the recorded commit.

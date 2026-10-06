@@ -2,7 +2,7 @@
 # claude-all 安装器(cc-gpt-plbbl 为兼容入口)。支持本地 clone 与 curl | bash。
 set -euo pipefail
 
-CCGP_VERSION="3.1.0"
+CCGP_VERSION="3.2.0"
 CCGP_REPO="${CCGP_REPO:-Valdemar-Yu/claude-all}"
 CCGP_REF="${CCGP_REF:-main}"
 
@@ -38,10 +38,14 @@ PREFIX="${CCGP_PREFIX:-$HOME/.local/share/claude-all}"
 BINDIR="${CCGP_BINDIR:-$HOME/.local/bin}"
 CONFIG_FILE="${CCGP_CONFIG_FILE:-$HOME/.config/claude-all/config}"
 ALLDIR="${CLAUDE_ALL_HOME:-$HOME/.claude-all}"
+CLAUDE_ALL_BATON_PREFIX="$PREFIX"
 _CLAUDE_CLI_LIB="$SELF_DIR/lib/claude-cli.sh"
 [ -f "$_CLAUDE_CLI_LIB" ] || die "安装包缺少 lib/claude-cli.sh"
 # shellcheck source=/dev/null
 source "$_CLAUDE_CLI_LIB"
+# shellcheck source=/dev/null
+source "$SELF_DIR/lib/baton.sh"
+_claude_all_baton_init
 
 # ---- 1.5 迁移 cc-gpt-plbbl 旧命名空间路径(幂等) ----
 if [ -d "$HOME/.local/share/cc-gpt-plbbl" ]; then
@@ -98,6 +102,23 @@ command -v claudish >/dev/null 2>&1 || die "没找到 claudish。安装:npm i -g
 command -v python3  >/dev/null 2>&1 || die "没找到 python3。statusline、settings 合并、模型列表解析和安全 profile 写入需要 Python 3。"
 command -v curl     >/dev/null 2>&1 || die "没找到 curl。模型列表发现需要 curl。"
 command -v sqlite3  >/dev/null 2>&1 || warn "没找到 sqlite3：无法从 CC Switch 自动读取 token，需配置 CCGP_TOKEN/token/token_cmd。"
+
+_BATON_ENABLED=0
+_BATON_READY=0
+_BATON_REASON=""
+case "${CCGP_BATON:-auto}" in
+  no)  info "按 CCGP_BATON=no 跳过 Baton 安装" ;;
+  yes) _BATON_ENABLED=1
+       command -v codex >/dev/null 2>&1 || warn "未找到 codex CLI；仍安装 Baton，使用前请安装并登录 Codex。" ;;
+  auto)
+    if command -v codex >/dev/null 2>&1; then
+      _BATON_ENABLED=1
+    else
+      warn "未找到 codex CLI，跳过 Baton 安装；需要时设置 CCGP_BATON=yes 并安装/登录 Codex。"
+    fi
+    ;;
+  *) die "CCGP_BATON 只能是 yes、no 或 auto" ;;
+esac
 
 _claudish_version="$(claudish --version 2>/dev/null || true)"
 if [[ "$_claudish_version" =~ ([0-9]+)\.([0-9]+) ]]; then
@@ -176,6 +197,10 @@ mkdir -p "$PREFIX" "$BINDIR"
 chmod 700 "$PREFIX" 2>/dev/null || true
 rm -rf "$PREFIX/bin" "$PREFIX/lib" "$PREFIX/statusline"
 cp -R "$SELF_DIR/bin" "$SELF_DIR/lib" "$SELF_DIR/statusline" "$PREFIX/"
+if [ "$_BATON_ENABLED" -eq 1 ]; then
+  rm -rf "$PREFIX/baton"
+  cp -R "$SELF_DIR/baton" "$PREFIX/"
+fi
 chmod +x "$PREFIX/bin/cc-gpt-plbbl" "$PREFIX/bin/claude-all" \
   "$PREFIX/statusline/statusline.py" "$PREFIX/statusline/install.sh"
 _runtime_version="$(_claude_all_install_runtime "$_claude_source" "$PREFIX/runtime/bin")" \
@@ -319,6 +344,29 @@ _mk_builtin claude-plbbl "$_plbbl_cmd" "plbbl GPT (claudish)"
 _update_builtin_cmd claude-plbbl "$_plbbl_cmd"
 info "多环境配置:${ALLDIR}；用户自建 profiles 不覆盖"
 
+if [ "$_BATON_ENABLED" -eq 1 ]; then
+  if _baton_install_error="$(_claude_all_baton_install 2>&1)"; then
+    if _claude_all_baton_link_managed_configs "$ALLDIR" "$CFGDIR" "$ALLDIR/profiles"; then
+      _BATON_READY=1
+      info "Baton：skill 与受管 config 链接已就绪"
+      if ! _baton_path_present "$CLAUDE_ALL_BATON_GLOBAL_COUNCIL"; then
+        info "council 未安装；需要时运行 $PREFIX/baton/install.sh --council（会联网 clone 第三方 council.skill）"
+      fi
+    else
+      _BATON_REASON="受管 config 链接失败"
+    fi
+  else
+    _BATON_REASON="${_baton_install_error:-skill 安装失败}"
+  fi
+  if [ "$_BATON_READY" -eq 0 ]; then
+    if [ "${CCGP_BATON:-auto}" = yes ]; then
+      [ -n "${_BATON_REASON}" ] && warn "Baton：${_BATON_REASON}"
+      die "Baton 安装失败。请检查 ~/.claude/skills/baton 与 ~/.local/bin/baton 的冲突提示。"
+    fi
+    warn "Baton 未就绪：${_BATON_REASON}；核心 claude-all 安装继续。需要时设置 CCGP_BATON=yes 重试。"
+  fi
+fi
+
 # ---- 7. 写单环境配置，保留已有 token/token_cmd ----
 mkdir -p "$(dirname "$CONFIG_FILE")"
 chmod 700 "$(dirname "$CONFIG_FILE")" 2>/dev/null || true
@@ -361,3 +409,6 @@ fi
 
 echo
 info "$(c '1;32' "安装完成 v$CCGP_VERSION")。主入口:claude-all；兼容入口:claude-plbbl / cc-gpt-plbbl"
+if [ "$_BATON_ENABLED" -eq 1 ] && [ "$_BATON_READY" -eq 0 ]; then
+  warn "Baton 未就绪：${_BATON_REASON}"
+fi

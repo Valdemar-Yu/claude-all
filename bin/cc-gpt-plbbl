@@ -53,7 +53,11 @@ _STATUSLINE="$_PREFIX/statusline/statusline.py"
 if [ "$CCGP_STATUSLINE" = yes ] && [ -f "$_STATUSLINE" ] && [ -f "$_LIB/statusline.sh" ]; then
   # shellcheck source=/dev/null
   source "$_LIB/statusline.sh"
-  export CLAUDISH_STATUSLINE_COMMAND="$(_claude_all_statusline_command "$_PREFIX")"
+  if [ -f "$_PREFIX/statusline/dispatch.py" ]; then
+    export CLAUDISH_STATUSLINE_COMMAND="$(_claude_all_statusline_dispatch_command "$_PREFIX")"
+  else
+    export CLAUDISH_STATUSLINE_COMMAND="$(_claude_all_statusline_command "$_PREFIX")"
+  fi
   export CLAUDISH_STATUSLINE_REFRESH=60
   export CLAUDE_ALL_POOL_USAGE_URL="$CCGP_POOL_USAGE_URL"
   export CLAUDE_ALL_POOL_KEYCHAIN_SERVICE="$CCGP_POOL_KEYCHAIN_SERVICE"
