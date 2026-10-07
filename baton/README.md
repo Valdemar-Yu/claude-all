@@ -1,8 +1,8 @@
 # Baton
 
-Claude Code skill in which Claude Opus 5.5 conducts and judges while GPT-6.1-Sol, driven through the Codex CLI, writes the code. Opus writes the brief, makes the hard calls, reviews every major change and checks on the executor every 30 minutes.
+Claude Code skill for a configurable conductor/judge/executor workflow. The default is Claude Opus conducting and GPT-6.1-Sol through Codex executing, but any claude-all profile can be the conductor or a Claude executor, and judge stages can use the council.skill panel.
 
-Baton 是一个 Claude Code skill。Claude Opus 5.5 担任**指挥**，在终端里调用 Codex CLI，让 GPT-6.1-Sol 担任**执行者**写代码。Opus 负责写任务简报、拍板关键决策、审阅每一次大修改，并且每 30 分钟检查一次执行者有没有跑偏、有没有把代码改坏。执行者每完成一处小修改就记一条日志，每完成一次大修改就交一份 HTML 汇报，然后停下来等 Opus 审阅。
+Baton 是一个 Claude Code skill。**conductor** 写任务简报和消息，**judge** 在决策、重大修改审阅、最终验收阶段裁决，**executor** 在独立进程里写代码。默认仍是 Claude Opus + Codex GPT-6.1-Sol；角色可通过 `roles.*`、`baton setup` 或 claude-all profile 替换。执行者每完成一处小修改就记一条日志，每完成一次大修改就交一份 HTML 汇报，然后停下来等裁判审阅。
 
 这个仓库就是 skill 本体。装一次以后，在任何项目里对 Claude Code 说一句 `/baton <任务>` 就能用，Baton 的运行记录写在那个项目的 `.baton/` 目录里。
 
@@ -10,14 +10,15 @@ Baton 是一个 Claude Code skill。Claude Opus 5.5 担任**指挥**，在终端
 
 | 角色 | 模型与设置 | 负责 |
 |---|---|---|
-| 指挥 | Claude Opus 5.5，Claude Code 主会话 | 简报、决策、审阅汇报、30 分钟监管、最终验收 |
-| 执行者 | `gpt-6.1-sol`，思考深度 `xhigh`，`service_tier="default"` 并禁用 `fast_mode` | 按简报改代码、跑验证、记日志、写汇报、提决策请求 |
-| 顾问团 | [council.skill](https://github.com/ParadoxZW/council.skill)，chief 为 Opus，顾问默认为 Opus 与 GPT-6.1-Sol | 重大决策时给 Opus 提供独立意见 |
+| 角色 | 默认配置 | 工作 |
+| conductor | Claude Opus 5.5，Claude Code 主会话 | 简报、消息、监管、最终验收 |
+| judge | 每个阶段由 conductor 自裁决；可切换为 council | 决策请求、REPORT 审阅、DONE 验收 |
+| executor | Codex `gpt-6.1-sol`，`xhigh`，默认 service tier，关闭 fast mode | 按简报改代码、跑验证、记日志、写汇报 |
 
-执行者的每次运行称为一**轮**（leg）。首轮是 `codex exec`，之后每轮都是带着指挥消息的 `codex exec resume <thread>`，所以执行者始终在同一个 Codex 会话里，前面的上下文都在。每轮结束时，执行者按固定的 JSON schema 交回 `done`、`decision`、`report` 或 `blocked` 四种状态之一，Baton 据此唤醒 Opus 做对应的事。
+执行者的每次运行称为一**轮**（leg）。Codex 首轮是 `codex exec`，之后是 `codex exec resume <thread>`；Claude 首轮是 `claude -p --output-format json`，之后用 `--resume <session_id>`。每轮结束时按固定 JSON schema 交回 `done`、`decision`、`report` 或 `blocked`，Baton 据此唤醒对应的 judge。
 
 ```
-Opus 写简报 ── baton start ──▶ Codex 执行（独立进程，会话关闭也不中断）
+Conductor 写简报 ── baton start ──▶ executor 执行（独立进程，会话关闭也不中断）
      ▲                              │
      │        baton wait（后台）◀───┤ 本轮结束 / 满 30 分钟 / 额度低于 5%
      │                              │
@@ -26,7 +27,7 @@ Opus 写简报 ── baton start ──▶ Codex 执行（独立进程，会话
 
 ## 安装
 
-需要 Claude Code、已登录的 Codex CLI（在 0.160 上测试）、Python 3.9 以上和 git。macOS 与 Linux 可用，桌面通知目前只在 macOS 上发。
+需要 Claude Code、Python 3.9 以上和 git。使用 Codex executor 时需要已登录的 Codex CLI；使用 Claude executor 时只需要对应 Claude/claude-all profile。macOS 与 Linux 可用，桌面通知目前只在 macOS 上发。
 
 ```bash
 git clone https://github.com/Valdemar-Yu/Baton.git && cd Baton
@@ -37,31 +38,41 @@ baton doctor            # 自检
 
 skill 是软链接，`git pull` 之后立即生效，不用重装。
 
-`--council` 不会覆盖已有的 council 安装和 `~/.local/bin/council-def.sh`。Baton 自带的顾问定义不需要任何 API key，Opus 顾问走 Claude Code 订阅，GPT-6.1-Sol 顾问走本机 Codex 登录。
+本目录是基于上游 91f5d2c 的 claude-all multi-agent 分支版本，不要求与上游逐文件一致。上游来源记录在 [`UPSTREAM`](UPSTREAM)；council 接口来自 [ParadoxZW/council.skill](https://github.com/ParadoxZW/council.skill)。
+
+`--council` 不会覆盖已有的 council 安装和 `~/.local/bin/council-def.sh`。Baton 自带的顾问定义不需要任何 API key；Claude 顾问走对应 profile，Codex 顾问走本机 Codex 登录。
 
 > [!IMPORTANT]
-> GPT-6.1-Sol 顾问和执行者共用同一份 Codex 额度。额度紧张时，把 `~/.claude/skills/council/config.json` 的 `councilors` 改成只留 `council-cc-opus`。
+> Codex 顾问和 Codex 执行者共用同一份 Codex 额度。额度紧张时，把 council 配置的 `councilors` 改成只留 Claude 顾问。
 
 `install.sh` 遇到冲突时不覆盖任何东西。如果 `~/.claude/skills/baton` 已经是一个普通目录，或者 PATH 上已有另一个叫 `baton` 的程序，它会跳过、提示你先处理，并以非零状态退出。
 
 ## 使用
 
-在 Claude Code 里打开目标项目，用 Opus 5.5 会话直接交代任务，例如
+在 Claude Code 或 claude-all 的 conductor profile 里打开目标项目，直接交代任务，例如
 
 ```
 /baton 给 parser 加流式解析，接口保持兼容，tests/ 里的用例全部要过
 ```
 
-Opus 会先读代码、写出 `.baton/tasks/<task>/brief.md`（目标、可检查的验收标准、允许与禁止修改的路径、验证命令），启动执行者，然后在后台运行 `baton wait`。之后不需要你盯着，Opus 被下面这些事件唤醒。
+在 claude-all 中可以直接选择 conductor profile：
 
-| 事件 | 触发 | Opus 的处理 |
+```bash
+claude-all baton "实现一个任务"
+claude-all baton --conductor deepseek "实现一个任务"
+baton setup --preset deepseek-council
+```
+
+conductor 会先读代码、写出 `.baton/tasks/<task>/brief.md`（目标、可检查的验收标准、允许与禁止修改的路径、验证命令），启动执行者，然后在后台运行 `baton wait`。之后不需要你盯着，配置里的 judge 被下面这些事件唤醒。
+
+| 事件 | 触发 | judge 的处理 |
 |---|---|---|
 | `TICK` | 距上次监管满 30 分钟 | 读 `baton status` 快照，对照简报判断 on_track、drifting 或 breaking，必要时纠偏或叫停 |
 | `REPORT` | 执行者完成一次大修改并写了 HTML 汇报 | 用 diff 和验证命令核对汇报，写审阅意见，APPROVE 或 REVISE 后续跑 |
 | `DECISION` | 执行者遇到需要拍板的问题 | 常规问题直接定；重大问题召集 council；需求取舍问你 |
 | `DONE` | 执行者认为任务完成 | 对照验收标准逐条验收，向你汇报 |
-| `QUOTA_LOW` | Codex 额度剩余低于 5% | 在回复里提醒你，任务照常进行 |
-| `PAUSED_UNSUPERVISED` | 超过 70 分钟没有监管 | 执行者已被自动暂停，Opus 先检查再续跑 |
+| `QUOTA_LOW` | Codex executor 额度剩余低于 5% | 在回复里提醒你；Claude executor 不触发此事件 |
+| `PAUSED_UNSUPERVISED` | 超过 70 分钟没有监管 | 执行者已被自动暂停，conductor/judge 先检查再续跑 |
 
 ## 执行者遵守的协议
 
@@ -71,23 +82,23 @@ Opus 会先读代码、写出 `.baton/tasks/<task>/brief.md`（目标、可检�
 
 **大修改**指新功能、跨模块重构、接口或依赖或数据格式的变化，以及自上次汇报以来累计达到阈值的改动。执行者按 `templates/report.html` 写 `.baton/reports/R<NNN>-<slug>.html`，列出改动清单、设计取舍、实际跑过的验证命令和结果、风险，以及最希望指挥检查的位置，然后结束本轮等待审阅。
 
-**决策请求**用于多个方案会影响架构、接口或难以回退，简报有歧义，或者同一问题连续修 3 次没修好的情况。执行者写 `.baton/decisions/D<NNN>-<slug>.md` 后停下，Opus 把决定写进同一文件末尾，再续跑。
+**决策请求**用于多个方案会影响架构、接口或难以回退，简报有歧义，或者同一问题连续修 3 次没修好的情况。执行者写 `.baton/decisions/D<NNN>-<slug>.md` 后停下，judge 把决定写进同一文件末尾，再续跑。
 
 协议还禁止执行者提交或改写 git 历史、删改 `.baton/` 里已有的记录，以及用删测试、放宽断言、改 CI 的方式让检查通过。阈值可以在配置里调整。
 
 ## 监管与回滚
 
-监管的计时从每轮开始或上一次监管算起。到点后 Opus 先跑 `baton status`，看执行者这段时间跑过哪些命令、退出码是多少、改了哪些文件，再看相对任务起点和上次监管的 diff 统计。被删除的文件、被改动的测试文件，以及构建、依赖、CI 文件会单独标出来，log.md 的新增内容也列在最后。Opus 据此给出结论，用 `baton supervised` 记入 `.baton/supervision.md`。
+监管的计时从每轮开始或上一次监管算起。到点后 conductor/judge 先跑 `baton status`，看执行者这段时间跑过哪些命令、退出码是多少、改了哪些文件，再看相对任务起点和上次监管的 diff 统计。被删除的文件、被改动的测试文件，以及构建、依赖、CI 文件会单独标出来，log.md 的新增内容也列在最后。随后用 `baton supervised` 记入 `.baton/supervision.md`。
 
-执行者跑在独立进程里，关掉 Claude Code 不会打断它。为了不让它长时间无人看管，超过 70 分钟没有监管时它会被自动暂停，等 Opus 回来检查后再继续。
+执行者跑在独立进程里，关掉 Claude Code 不会打断它。为了不让它长时间无人看管，超过 70 分钟没有监管时它会被自动暂停，等 conductor/judge 回来检查后再继续。
 
-每轮开始和结束、每次监管时，Baton 都把工作区（已跟踪和未跟踪的文件）存成 `refs/baton/<task>/...` 下的一个 git 提交。它用临时索引生成，不改动你的分支、HEAD 和暂存区。被 `.gitignore` 忽略的文件和子模块内部的改动不在回滚点里。`baton rollback <task> <ref> --yes` 把工作区文件恢复到任一回滚点，HEAD、分支、暂存区和 `.baton/` 下的记录都不动。执行前当前状态先存成一个新回滚点，所有要改写或删除的文件再原样复制一份到 `.baton/rollback-backup/`，被忽略的文件和经过过滤器的文件因此也能找回。删除和写入都不会穿过符号链接落到仓库外面，也不会进入子模块。Opus 只在你同意后执行回滚。
+每轮开始和结束、每次监管时，Baton 都把工作区（已跟踪和未跟踪的文件）存成 `refs/baton/<task>/...` 下的一个 git 提交。它用临时索引生成，不改动你的分支、HEAD 和暂存区。被 `.gitignore` 忽略的文件和子模块内部的改动不在回滚点里。`baton rollback <task> <ref> --yes` 把工作区文件恢复到任一回滚点，HEAD、分支、暂存区和 `.baton/` 下的记录都不动。执行前当前状态先存成一个新回滚点，所有要改写或删除的文件再原样复制一份到 `.baton/rollback-backup/`，被忽略的文件和经过过滤器的文件因此也能找回。删除和写入都不会穿过符号链接落到仓库外面，也不会进入子模块。回滚需要 conductor/judge 先获得用户同意。
 
 ## Codex 额度
 
 Baton 通过 `codex app-server` 的 `account/rateLimits/read` 读取账户额度。这个调用只查账户状态，不消耗模型 token。结果缓存 120 秒，app-server 不可用时退回到最近一次 Codex 会话记录里的额度数据。
 
-Opus 在一个项目里第一次运行 `baton init` 时，会把这个项目的 statusline 配成两行。第一行是你原来的 statusline。Baton 的脚本按 Claude Code 的设置优先级找到它，再原样调用，所以 terminal-label 这类顺带改终端标题的 statusline 照常工作。第二行是 Codex 额度。
+第一次运行 `baton init` 时，Baton 会把项目 statusline 包装成两行：第一行保留原 statusline，第二行只在 executor adapter 为 Codex 时显示额度。Claude executor 不查询 Codex quota。
 
 ```
 Codex gpt-6.1-sol·xhigh │ 7d 剩余 92% █████████░ ↻3d18h │ credits 62500 │ 重置券 1
@@ -95,7 +106,7 @@ Codex gpt-6.1-sol·xhigh │ 7d 剩余 92% █████████░ ↻3d1
 
 配置写在项目的 `.claude/settings.local.json`，它的优先级高于用户级设置，只影响这个项目；路径是本机的，Baton 会把它加进 `.git/info/exclude`，不会被提交；如果这个文件已经被 git 跟踪，Baton 默认不改它，确实要装就用 `baton statusline install --force`。Claude Code 会热加载设置文件，项目原本就有 `.claude/` 目录时当前会话直接生效，目录是新建的就需要重开一次会话。`baton statusline uninstall` 可以恢复原样，`baton init --no-statusline` 则完全不碰 statusline。statusline 命令指向 `~/.claude/skills/baton` 下的脚本，所以挪动或重新克隆仓库后重跑一次 `install.sh` 就行；如果要彻底删掉 Baton，先在用过它的项目里运行 `baton statusline uninstall`，否则这些项目的 statusline 两行都会消失。
 
-剩余低于 5% 时，这一行前面出现红底的「Codex 额度低于 5%」，macOS 上每个额度窗口弹一次桌面通知，`baton start`、`resume`、`status`、`quota`、`doctor` 的输出和每一轮结束的事件里都会带 `BATON::QUOTA_LOW`，后台的 `baton wait` 在一轮运行期间每 5 分钟查一次，同一个窗口第一次跌破阈值时提前唤醒 Opus。Opus 看到后会在回复里提醒你。statusline 只读缓存，过期时在后台刷新，渲染一次约 0.15 秒。
+Codex 额度剩余低于阈值时才会出现红底提示、桌面通知和 `BATON::QUOTA_LOW` 事件；Claude executor 不发起额度查询。statusline 只读缓存，过期时在后台刷新。
 
 > [!NOTE]
 > 两行显示已在 Claude Code 2.1.289 的交互界面里实测。statusline 每 60 秒刷新一次，沿用你原有配置的 `refreshInterval`。
@@ -104,14 +115,42 @@ Codex gpt-6.1-sol·xhigh │ 7d 剩余 92% █████████░ ↻3d1
 
 默认值在 `skills/baton/config.json`。除 `quota` 一节外，项目都可以在 `.baton/config.json` 里覆盖；额度按账号计算，`quota` 只读 skill 自己的配置。
 
+常用预设：
+
+```bash
+baton setup --preset default             # Claude Opus 指挥 + conductor judge + Codex executor
+baton setup --preset deepseek-council    # DeepSeek 指挥 + council 合议 + Codex executor
+baton setup --preset kimi-claude          # Kimi 指挥 + claude-all GLM executor
+```
+
+等价的角色片段如下。`council.skill` 的原始仓库是 [ParadoxZW/council.skill](https://github.com/ParadoxZW/council.skill)：
+
+```json
+{
+  "roles": {
+    "conductor": {"label": "DeepSeek", "backend": "claude-all", "profile": "deepseek"},
+    "judge": {"mode": "council", "stages": {"decision": "council", "review": "council", "final": "council"}},
+    "executor": {"adapter": "codex", "model": "gpt-6.1-sol", "reasoning_effort": "xhigh"}
+  }
+}
+```
+
+Claude executor 没有 Codex 的 OS 沙箱。默认权限模式是 `acceptEdits`，工具由白名单限制；显式设置 `bypassPermissions` 才会绕过权限检查。普通 `claude` executor 会清理继承的第三方环境变量，`claude-all` executor 把清理交给 claude-all；`inherit_env=true` 才保留继承变量。
+
 | 键 | 默认值 | 说明 |
 |---|---|---|
-| `executor.model` | `gpt-6.1-sol` | 执行者模型 |
-| `executor.reasoning_effort` | `xhigh` | 该模型支持 low / medium / high / xhigh / max / ultra |
-| `executor.service_tier` | `default` | 标准速度；Fast 档对应 `priority` |
-| `executor.disable_fast_mode` | `true` | 运行时附加 `--disable fast_mode` |
-| `executor.sandbox` | `workspace-write` | 执行者只能写项目目录 |
-| `executor.network_access` | `false` | 需要装依赖或下载时设为 `true` |
+| `roles.conductor.profile` | 空 | claude-all 指挥 profile；空值回退官方 `claude` |
+| `roles.judge.stages` | 三个 `conductor` | 三阶段分别选择 `conductor` 或 `council` |
+| `roles.executor.adapter` | `codex` | `codex` 或 `claude` |
+| `roles.executor.model` | `gpt-6.1-sol` | 执行者模型 |
+| `roles.executor.reasoning_effort` | `xhigh` | Codex 模型支持 low / medium / high / xhigh / max / ultra |
+| `roles.executor.service_tier` | `default` | Codex 标准速度；Fast 档对应 `priority` |
+| `roles.executor.disable_fast_mode` | `true` | Codex 运行时附加 `--disable fast_mode` |
+| `roles.executor.sandbox` | `workspace-write` | Codex 的项目写入沙箱；Claude 没有 OS 沙箱 |
+| `roles.executor.network_access` | `false` | Codex 网络开关；Claude 通过权限模式和工具白名单限制 |
+| `roles.executor.permission_mode` | `acceptEdits` | Claude headless 权限模式；`bypassPermissions` 只能显式配置 |
+| `roles.executor.allowed_tools` | 自动生成 | Claude 工具白名单；缺省时包含验证命令前缀，禁用网络时排除安装命令 |
+| `roles.executor.inherit_env` | `false` | 普通 Claude executor 是否显式保留指挥会话的后端环境变量 |
 | `supervision.interval_minutes` | `30` | 监管间隔 |
 | `supervision.max_unsupervised_minutes` | `70` | 超时自动暂停，`0` 表示关闭 |
 | `supervision.test_command` | 空 | 监管和审阅时运行的验证命令 |
@@ -126,21 +165,22 @@ Codex gpt-6.1-sol·xhigh │ 7d 剩余 92% █████████░ ↻3d1
 .baton/
   config.json             项目级配置
   log.md                  执行者的修改日志
-  supervision.md          Opus 的监管记录
+  supervision.md          conductor/judge 的监管记录
   tasks/<task>/           brief.md 简报、state.json 状态、steer-*.md 纠偏消息
   reports/R<NNN>-*.html   执行者的大修改汇报
-  reviews/                Opus 的审阅意见与最终验收
+  reviews/                judge 的审阅意见与最终验收
   decisions/D<NNN>-*.md   决策请求与指挥决定
-  runs/<task>/            每轮的 prompt、Codex 事件流、最终输出、stderr（已 gitignore）
+  runs/<task>/            每轮的 prompt、executor 活动、最终输出、stderr（已 gitignore）
 ```
 
 ## 命令
 
 | 命令 | 作用 |
 |---|---|
-| `baton doctor` | 检查 codex、模型与思考深度、加速是否关闭、额度、council、git |
+| `baton setup [--preset ...]` | 配置 conductor、judge、councilor 和 executor；TTY 会列出 claude-all profile 名与 label |
+| `baton doctor` | 检查三角色、Claude 工具白名单、council、git；只有 Codex executor 检查额度 |
 | `baton init` / `baton new <task>` | 初始化 `.baton/` 并配置项目 statusline，生成简报模板 |
-| `baton statusline install/uninstall/status [--force]` | 单独管理项目 statusline 的 Codex 额度行 |
+| `baton statusline install/uninstall/status [--force]` | 管理项目 statusline；仅 Codex executor 显示额度行 |
 | `baton start <task>` | 首轮 |
 | `baton resume <task> <file> --kind 决策/审阅/纠偏` | 带指挥消息续跑 |
 | `baton wait <task>` | 阻塞到下一个事件，在后台运行 |
@@ -149,7 +189,7 @@ Codex gpt-6.1-sol·xhigh │ 7d 剩余 92% █████████░ ↻3d1
 | `baton steer <task> <file>` / `baton stop <task>` | 停止当前轮并纠偏续跑 / 只停止 |
 | `baton diff <task> --since base/leg/tick/report` | 相对任务起点、本轮起点、上次监管、上次汇报的改动 |
 | `baton refs <task>` / `baton rollback <task> <ref> --yes` | 回滚点列表 / 回滚 |
-| `baton quota` | 查看 Codex 额度 |
+| `baton quota` | 查看 Codex 额度；非 Codex executor 显示额度不适用 |
 
 ## 致谢与许可
 

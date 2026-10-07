@@ -2,5 +2,8 @@ repository: https://github.com/Valdemar-Yu/Baton
 commit: 91f5d2c3d8c721a517890687b9cdd8c4d23a60bd
 synced_at: 2026-10-06
 
-Local patches:
-- None. Vendored files under baton/ match the tracked upstream checkout at the recorded commit.
+Local branch:
+- 基于上游 91f5d2c 的 claude-all multi-agent 分支版本。
+- 指挥、裁判、执行者角色可配置；执行者支持 codex 与 claude 适配器及会话续跑。
+- 增加分层配置、setup、doctor/statusline 条件、council 生成和 claude-all 入口集成。
+- `scripts/sync-baton.sh --check` 仅报告与上游的差异，不再要求逐文件一致。

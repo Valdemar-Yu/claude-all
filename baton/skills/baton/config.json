@@ -9,6 +9,50 @@
     "network_access": false,
     "extra_config": []
   },
+  "roles": {
+    "conductor": {
+      "label": "Claude Opus 5.5",
+      "backend": "claude-code",
+      "model": "opus",
+      "profile": ""
+    },
+    "judge": {
+      "mode": "conductor",
+      "stages": {
+        "decision": "conductor",
+        "review": "conductor",
+        "final": "conductor"
+      },
+      "council": {
+      "chief_model": "",
+        "chief_backend": "",
+        "councilors": [
+          {
+            "name": "council-cc-opus",
+            "adapter": "claude",
+            "model": "opus",
+            "profile": ""
+          },
+          {
+            "name": "council-codex-sol",
+            "adapter": "codex",
+            "model": "gpt-6.1-sol",
+            "reasoning_effort": "xhigh"
+          }
+        ]
+      }
+    },
+    "executor": {
+      "adapter": "codex",
+      "model": "gpt-6.1-sol",
+      "reasoning_effort": "xhigh",
+      "service_tier": "default",
+      "disable_fast_mode": true,
+      "sandbox": "workspace-write",
+      "network_access": false,
+      "extra_config": []
+    }
+  },
   "supervision": {
     "interval_minutes": 30,
     "max_unsupervised_minutes": 70,

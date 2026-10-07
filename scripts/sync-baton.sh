@@ -67,16 +67,13 @@ while IFS= read -r _path; do
 done <<EOF_FILES
 $(git -C "$_SOURCE" ls-files -- $_paths)
 EOF_FILES
-if [ "$_ok" -ne 1 ]; then
-  if [ "$_CHECK" -eq 1 ]; then
-    echo "Baton vendored tracked files differ from $_SOURCE" >&2
-    exit 1
+if [ "$_CHECK" -eq 1 ]; then
+  if [ "$_ok" -ne 1 ]; then
+    echo "Baton vendored files differ from upstream $_SOURCE @ $_COMMIT (local multi-agent branch; differences are expected)" >&2
+  else
+    echo "Baton vendored files match upstream $_SOURCE @ $_COMMIT"
   fi
-else
-  if [ "$_CHECK" -eq 1 ]; then
-    echo "Baton vendored tracked files match $_SOURCE @ $_COMMIT"
-    exit 0
-  fi
+  exit 0
 fi
 
 rm -rf "$_VENDOR/skills" "$_VENDOR/council" \
@@ -91,8 +88,10 @@ repository: https://github.com/Valdemar-Yu/Baton
 commit: $_COMMIT
 synced_at: $_sync_date
 
-Local patches:
-- None. Vendored files under baton/ match the tracked upstream checkout at the recorded commit.
+Local branch:
+- claude-all multi-agent branch; vendored files intentionally diverge from upstream.
+- Executor adapters: codex and claude; configurable conductor/judge/council roles.
+- Setup, doctor, statusline, council generation and claude-all integration are maintained locally.
 META
 chmod +x "$_VENDOR/install.sh" "$_VENDOR/skills/baton/bin/baton" "$_VENDOR/skills/baton/scripts"/*.py
 printf 'Synced Baton %s from %s\n' "$_COMMIT" "$_SOURCE"

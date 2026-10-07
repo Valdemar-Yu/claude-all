@@ -55,8 +55,12 @@ claudish 的 `litellm` provider 是通用兼容层,工具调用(tool_use)翻译�
 
 `~/.claude-all`、`CCGP_CONFIG_DIR` 默认的 `~/.claude-plbbl` 和 profile 中声明的 `CLAUDE_CONFIG_DIR` 都只建立 `skills/baton` 到 `~/.claude/skills/baton` 的软链，council 已安装时同理。这样每个受管环境通过同一个全局入口看到实际使用的 Baton，用户已有普通目录、软链和外部 wrapper 不会被替换。每次 direct 或 claudish profile 启动时会再次幂等补链，覆盖后来新增的 profile。
 
-`claude-all baton` 只使用官方 `claude.env` profile，并显式传 `--model opus`。它快速检查 Baton CLI、Codex CLI 和官方 profile，不启动耗时 doctor。菜单检测到可用 Baton 时追加同一个入口。doctor 把 Baton 当可选组件，报告 CLI 来源、Codex 和各受管 config 的链接，缺失不会改变原有失败计数。
+`claude-all baton` 读取 Baton 的 `roles.conductor.profile`；未配置时回退官方 `claude.env` 和 `--model opus`。`--conductor <profile>` 只覆盖当前启动。菜单里的 Baton 项进入二级 profile 菜单，并提供 `baton setup` 配置入口。快速检查只要求当前 executor adapter 所需的命令：Codex executor 检查 `codex`，Claude executor 可以完全不安装 Codex。doctor 报告 conductor、judge、executor 三个角色和最终 Claude 工具白名单。
+
+Baton 的执行者适配器把命令构造、环境和结果解析隔离。Codex 使用 JSONL 事件与 `codex exec resume <thread>`；Claude 使用 headless `claude -p --output-format json`、`--resume <session_id>` 和协议 schema，结果优先读取执行者写入的结果文件，再读取结构化 JSON，最后扫描 stdout 末尾的协议对象。任务开始时把 `executor_adapter` 固化在 state，改配置不会切换正在运行的任务。
+
+Claude executor 没有 Codex 的 OS 沙箱。默认 `acceptEdits` 加工具白名单，白名单包含常用只读命令和项目 `supervision.test_command` 的命令前缀；`network_access=false` 时排除 curl、wget 和安装依赖的命令。显式设置 `bypassPermissions` 才会绕过权限检查。普通 `claude` executor 会清理继承的 `ANTHROPIC_*`、`OPENAI_*`、`CLAUDISH_*`、`CLAUDE_CONFIG_DIR` 和 `CLAUDE_CODE_*` 变量，避免 DeepSeek/Kimi 指挥环境污染执行者；`claude-all` executor 把清理交给 claude-all 自己完成。
 
 claudish 的临时 `--settings` 优先级高于项目 `.claude/settings.local.json`，因此 claudish profile 的 `CLAUDISH_STATUSLINE_COMMAND` 指向 claude-all 的分发器。分发器只把项目 settings 当作 Baton 开关，解析后确认脚本 realpath 是全局或 vendored Baton，再以 `shell=False` 执行固定参数；解析失败或普通项目都回退原 claude-all statusline。direct 由项目级 Baton wrapper 直接追加一行 Codex 额度，`baton init --no-statusline` 不会追加。
 
-卸载器只删除 manifest 里仍与记录相符的 claude-all 软链和 vendored 安装，不删除用户自装 Baton、council 或项目 `.baton` 文件。项目级 statusline 属于 Baton 自己的状态，需在项目目录运行 `baton statusline uninstall` 后再卸载 claude-all。vendor 来源和上游 commit 记录在 `baton/UPSTREAM`，`scripts/sync-baton.sh --check <Baton checkout>` 只比较上游 Git 跟踪文件。
+卸载器只删除 manifest 里仍与记录相符的 claude-all 软链和 vendored 安装，不删除用户自装 Baton、council 或项目 `.baton` 文件。项目级 statusline 属于 Baton 自己的状态，需在项目目录运行 `baton statusline uninstall` 后再卸载 claude-all。vendor 来源和上游 commit 记录在 `baton/UPSTREAM`。这是基于上游 91f5d2c 的 claude-all multi-agent 分支；`scripts/sync-baton.sh --check <Baton checkout>` 会报告与上游的差异，不把逐文件一致当作通过条件。council 配置生成遵循 [council.skill](https://github.com/ParadoxZW/council.skill) 的原始接口；已有 council 配置和 `council-def.sh` 不会被覆盖，Baton 文件旁写为 `config.baton.json` 与 `council-def.baton.sh`。

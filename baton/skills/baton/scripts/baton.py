@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Baton: Claude (conductor / judge) drives Codex CLI (executor).
+"""Baton: a configurable conductor/judge drives a detached executor.
 
-Every Codex run is a "leg": `codex exec` (first leg) or `codex exec resume <thread>` (later legs).
+Every executor run is a "leg": Codex uses `codex exec` / `resume`; Claude uses `claude -p` /
+`--resume <session_id>`.
 A leg ends when the executor finishes, asks for a decision, hands in a major-change report,
 gets blocked, or is stopped. Legs run detached, so they survive the Claude session; Claude
 blocks on `baton wait` (in the background) and is woken by leg ends and 30-minute ticks.
@@ -34,6 +35,8 @@ REFERENCES = os.path.join(SKILL_DIR, "references")
 sys.path.insert(0, HERE)
 import codex_quota  # noqa: E402
 import statusline as baton_statusline  # noqa: E402
+import baton_config  # noqa: E402
+import adapters  # noqa: E402
 
 EXCLUDE = [":(exclude).baton", ":(exclude).council"]
 TASK_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
@@ -50,7 +53,7 @@ NEXT_STEP = {
     "BLOCKED": "看 summary 里缺什么；能解决就解决后 baton resume，涉及权限/网络/费用先问用户。",
     "FAILED": "看错误和 stderr 末尾判断原因（额度、网络、参数）；修正后 baton resume 重试本轮。",
     "STOPPED": "已按指令停止。写纠偏/修复指令后 baton resume。",
-    "PAUSED_UNSUPERVISED": "超过监管时限没有 Opus 检查，执行者已被暂停。先做一次监管检查，再 baton resume。",
+    "PAUSED_UNSUPERVISED": "超过监管时限没有 conductor/judge 检查，执行者已被暂停。先做一次监管检查，再 baton resume。",
     "TICK": "按 references/supervision.md 做一次监管检查，结束时运行 baton supervised 记录结论，然后重新后台 baton wait。",
     "QUOTA_LOW": "立刻在回复里提醒用户 Codex 额度不足，然后重新后台 baton wait。",
 }
@@ -325,8 +328,10 @@ class Project:
 
     @property
     def config(self):
-        base = read_json(os.path.join(SKILL_DIR, "config.json"), {})
-        return deep_merge(base, read_json(os.path.join(self.dir, "config.json"), {}))
+        return baton_config.load_config(
+            os.path.join(SKILL_DIR, "config.json"),
+            os.path.join(self.dir, "config.json"),
+        )
 
     def p(self, *parts):
         return os.path.join(self.dir, *parts)
@@ -382,16 +387,22 @@ def runner_marker(task, n):
     return f"_run {task} {n}"
 
 
+def executor_alive(leg):
+    """The leg's own executor process is running (guarded against PID reuse)."""
+    return bool(leg) and not leg.get("executor_exited", leg.get("codex_exited")) \
+        and pid_alive(leg.get("executor_pid", leg.get("codex_pid")), leg.get("last") or "\0")
+
+
 def codex_alive(leg):
-    """The leg's own codex process is running (identified by its unique -o path, not just 'codex')."""
-    return bool(leg) and not leg.get("codex_exited") and pid_alive(leg.get("codex_pid"), leg.get("last") or "\0")
+    """Backward-compatible alias used by older state and status output."""
+    return executor_alive(leg)
 
 
-def kill_codex(leg):
-    """Stop the leg's codex process group (codex is started as a session leader). True if it was alive."""
-    if not codex_alive(leg):
+def kill_executor(leg):
+    """Stop the leg's executor process group (started as a session leader)."""
+    if not executor_alive(leg):
         return False
-    pid = leg["codex_pid"]
+    pid = leg.get("executor_pid", leg.get("codex_pid"))
     for sig, grace in ((signal.SIGTERM, 8), (signal.SIGKILL, 3)):
         try:
             os.killpg(pid, sig)
@@ -405,6 +416,11 @@ def kill_codex(leg):
     return True
 
 
+def kill_codex(leg):
+    """Backward-compatible alias for stopping the current executor."""
+    return kill_executor(leg)
+
+
 def refresh_runner_liveness(project, task, st):
     """A leg marked running whose runner is gone died without cleanup: stop its codex, mark failed."""
     leg = current_leg(st)
@@ -414,7 +430,7 @@ def refresh_runner_liveness(project, task, st):
         return st  # launch_leg has not recorded the runner pid yet
     if pid_alive(leg.get("runner_pid"), runner_marker(task, leg["n"])):
         return st
-    killed = kill_codex(leg)
+    killed = kill_executor(leg)
 
     def mark(s):
         lg = current_leg(s)
@@ -422,6 +438,7 @@ def refresh_runner_liveness(project, task, st):
             lg["status"] = "failed"
             lg["error"] = "runner 进程意外退出（机器重启或被杀）" + ("；已终止残留的 codex 进程" if killed else "")
             lg["ended_at"] = now()
+            lg["executor_exited"] = True
             lg["codex_exited"] = True
             s["status"] = "idle"
     return project.update_state(task, mark)
@@ -547,30 +564,25 @@ def protocol_text(project, task):
     })
 
 
+def adapter_for(project, adapter_name=None):
+    cfg = project.config["executor"]
+    if adapter_name:
+        cfg = dict(cfg, adapter=adapter_name)
+    return adapters.get_adapter(cfg)
+
+
+def uses_codex(project, leg=None):
+    name = (leg or {}).get("executor_adapter") if leg else None
+    return (name or baton_config.executor_adapter(project.config)) == "codex"
+
+
+def executor_command(project, kind, session_id, result_path):
+    return adapter_for(project).build_command(project, kind, session_id, result_path)
+
+
 def codex_command(project, kind, thread_id, last_path):
-    ex = project.config["executor"]
-    cmd = ["codex", "exec"] + (["resume"] if kind == "resume" else [])
-    cmd += ["--json", "-m", ex["model"],
-            "-c", f'model_reasoning_effort="{ex["reasoning_effort"]}"',
-            "-c", f'service_tier="{ex["service_tier"]}"',
-            "-c", f'sandbox_mode="{ex["sandbox"]}"',
-            "-c", 'approval_policy="never"',
-            "--output-schema", os.path.join(TEMPLATES, "leg-result.schema.json"),
-            "-o", last_path]
-    if ex["sandbox"] == "workspace-write":
-        net = "true" if ex.get("network_access") else "false"
-        cmd += ["-c", f"sandbox_workspace_write.network_access={net}"]
-    if ex.get("disable_fast_mode"):
-        cmd += ["--disable", "fast_mode"]
-    for kv in ex.get("extra_config") or []:
-        cmd += ["-c", kv]
-    if not is_git(project.root):
-        cmd += ["--skip-git-repo-check"]
-    if kind == "start":
-        cmd += ["-C", project.root, "-"]
-    else:
-        cmd += [thread_id, "-"]
-    return cmd
+    """Compatibility wrapper retained for callers and old integrations."""
+    return adapter_for(project, "codex").build_command(project, kind, thread_id, last_path)
 
 
 # ---------------------------------------------------------------- project statusline
@@ -797,6 +809,137 @@ def cmd_init(project, args):
         print("注意：不是 git 仓库，回滚点（checkpoint）不可用。建议先 git init；之后再运行一次 baton init。")
 
 
+def _setup_prompt(label, default=""):
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{label}{suffix}: ").strip()
+    return value or default
+
+
+def _claude_all_profile_entries():
+    """Read profile names/labels only; never source a profile or inspect credentials."""
+    root = os.environ.get("CLAUDE_ALL_PROFILES_DIR") or os.path.expanduser("~/.claude-all/profiles")
+    out = []
+    try:
+        paths = sorted(os.path.join(root, name) for name in os.listdir(root) if name.endswith(".env"))
+    except OSError:
+        return out
+    for path in paths:
+        values = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    if key in ("CLAUDE_ALL_LABEL", "CLAUDE_ALL_DEFAULT_MODEL", "CLAUDE_ALL_MODEL", "ANTHROPIC_MODEL"):
+                        values[key] = value.strip().strip("\"'")
+        except OSError:
+            continue
+        name = os.path.splitext(os.path.basename(path))[0]
+        label = values.get("CLAUDE_ALL_LABEL") or values.get("CLAUDE_ALL_DEFAULT_MODEL") \
+            or values.get("CLAUDE_ALL_MODEL") or values.get("ANTHROPIC_MODEL") or name
+        out.append((name, label))
+    return out
+
+
+def _setup_choice(label, choices, default=""):
+    if not choices:
+        return _setup_prompt(label, default)
+    values = ["（不指定）"] + ["{} ({})".format(name, text) for name, text in choices]
+    try:
+        default_idx = [name for name, _ in choices].index(default) + 1
+    except ValueError:
+        default_idx = 0
+    print(label)
+    for i, value in enumerate(values, 1):
+        print("  {}. {}{}".format(i, value, " [默认]" if i - 1 == default_idx else ""))
+    raw = input("选择 [{}]: ".format(default_idx + 1)).strip()
+    raw = raw or str(default_idx + 1)
+    try:
+        index = int(raw) - 1
+    except ValueError:
+        return default
+    if 0 <= index < len(values):
+        return "" if index == 0 else choices[index - 1][0]
+    return default
+
+
+def _setup_interactive(args):
+    """Fill setup args with a small TTY menu; never called for non-TTY input."""
+    args.preset = _setup_prompt("预设（default/deepseek-council/kimi-claude）", "default")
+    args.conductor_label = _setup_prompt("指挥标签", "Claude Opus 5.5")
+    args.conductor_backend = _setup_prompt("指挥后端", "claude-code")
+    args.conductor_model = _setup_prompt("指挥模型", "opus")
+    profiles = _claude_all_profile_entries()
+    args.conductor_profile = _setup_choice("指挥 profile（只读 claude-all profile 名与 label）", profiles, "")
+    args.judge_mode = _setup_prompt("裁判模式（conductor/council）", "conductor")
+    for stage, text in (("decision", "决策"), ("review", "大修改审阅"), ("final", "最终验收")):
+        setattr(args, f"judge_{stage}", _setup_prompt(f"{text}裁判（conductor/council）", args.judge_mode))
+    args.executor_adapter = _setup_prompt("执行者适配器（codex/claude）", "codex")
+    args.executor_model = _setup_prompt("执行者模型", "gpt-6.1-sol" if args.executor_adapter == "codex" else "")
+    if args.executor_adapter == "claude":
+        args.executor_command = _setup_prompt("Claude 命令（claude/claude-all）", "claude")
+        args.executor_profile = _setup_choice("Claude 执行者 profile（只读名称与 label）", profiles, "")
+        args.executor_permission_mode = _setup_prompt("权限模式", "acceptEdits")
+        args.executor_inherit_env = _setup_prompt("保留指挥环境变量（true/false）", "false")
+    if args.judge_mode == "council" and profiles:
+        print("councilor 可选 profile（只读名称与 label）：")
+        for name, label in profiles:
+            print("  - {} ({})".format(name, label))
+    return args
+
+
+def _validate_setup_config(config):
+    roles = config.get("roles") if isinstance(config, dict) else {}
+    roles = roles if isinstance(roles, dict) else {}
+    executor = roles.get("executor") if isinstance(roles.get("executor"), dict) else {}
+    adapter = str(executor.get("adapter") or "codex").lower()
+    if adapter not in baton_config.ADAPTERS:
+        die(f"不支持的执行者适配器：{adapter}（可选 codex、claude）")
+    judge = roles.get("judge") if isinstance(roles.get("judge"), dict) else {}
+    mode = judge.get("mode", "conductor")
+    if mode not in baton_config.JUDGE_MODES:
+        die(f"不支持的裁判模式：{mode}（可选 conductor、council）")
+    stages = judge.get("stages") if isinstance(judge.get("stages"), dict) else {}
+    for stage in baton_config.JUDGE_STAGES:
+        if stages.get(stage, mode) not in baton_config.JUDGE_MODES:
+            die(f"裁判阶段 {stage} 必须是 conductor 或 council")
+
+
+def cmd_setup(project, args):
+    """Write role configuration from presets/flags, or guide a TTY user."""
+    explicit = any(getattr(args, name, None) is not None for name in (
+        "preset", "conductor_label", "conductor_backend", "conductor_model", "conductor_profile",
+        "judge_mode", "judge_decision", "judge_review", "judge_final", "judge_councilor",
+        "executor_adapter", "executor_model", "executor_reasoning_effort", "executor_service_tier",
+        "executor_sandbox", "executor_network_access", "executor_disable_fast_mode", "executor_command",
+        "executor_profile", "executor_config_dir", "executor_env_file", "executor_permission_mode", "executor_inherit_env",
+        "executor_allowed_tool", "executor_extra_arg",
+    ))
+    if not explicit:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            die("非 TTY 下 baton setup 必须提供参数（例如 --preset default；不会提问）")
+        _setup_interactive(args)
+    target = baton_config.config_target(project.root, args.scope)
+    existing = baton_config.read_json(target, {}) or {}
+    try:
+        updated = baton_config.apply_setup_patch(existing, args)
+    except ValueError as e:
+        die(str(e))
+    _validate_setup_config(baton_config.normalize_config(updated, base=project.config))
+    baton_config.write_config(target, updated)
+    effective = baton_config.load_config(os.path.join(SKILL_DIR, "config.json"), target)
+    conductor = baton_config.conductor_config(effective)
+    judge = baton_config.judge_config(effective)
+    executor = baton_config.executor_config(effective)
+    print(f"已写入 Baton {args.scope} 配置：{target}")
+    print(f"指挥：{conductor.get('label') or '未标注'}（{conductor.get('backend') or '未指定'}）")
+    print(f"裁判：{judge.get('mode')}；决策={judge.get('stages', {}).get('decision')}，"
+          f"审阅={judge.get('stages', {}).get('review')}，最终验收={judge.get('stages', {}).get('final')}")
+    print(f"执行者：{executor.get('adapter')} · {executor.get('model') or '未指定'}")
+
+
 def cmd_statusline(project, args):
     if args.action == "install":
         print(statusline_install(project, force=args.force))
@@ -860,13 +1003,17 @@ def launch_leg(project, task, kind, prompt):
         with open(prompt_path, "w") as f:
             f.write(prompt)
 
-        print(codex_quota.describe(safe_quota(block=True, notify=True)))
+        ex_cfg = project.config["executor"]
+        ex_adapter = st.get("executor_adapter") or ("codex" if st.get("thread_id") else baton_config.executor_adapter(project.config))
+        if ex_adapter == "codex":
+            print(codex_quota.describe(safe_quota(block=True, notify=True)))
 
         start_ref, err = try_checkpoint(project.root, task, f"leg-{n:03d}-start")
         if err:
             print(f"注意：本轮起点回滚点没建成：{err}")
         last_path = project.leg_path(task, n, "last.json")
-        cmd = codex_command(project, kind, st.get("thread_id"), last_path)
+        session_id = st.get("session_id") or st.get("thread_id")
+        cmd = executor_command(project, kind, session_id, last_path)
         t0 = now()
         log_size = file_size(project.p("log.md"))
 
@@ -878,9 +1025,11 @@ def launch_leg(project, task, kind, prompt):
                 "n": n, "kind": kind, "status": "running", "started_at": t0,
                 "start_ref": start_ref, "cmd": cmd, "prompt": prompt_path,
                 "events": project.leg_path(task, n, "events.jsonl"), "last": last_path,
+                "executor_adapter": ex_adapter, "session_id": session_id or "",
                 "stderr": project.leg_path(task, n, "stderr.log"), "log_size_at_start": log_size,
             })
             s["status"] = "running"
+            s["executor_adapter"] = ex_adapter
             # resuming the executor is itself a supervision point: Opus has just looked at everything
             s["last_supervision_at"] = t0
             s["supervision"] = {"leg": n, "events_offset": 0, "log_offset": log_size, "ref": start_ref, "since": t0}
@@ -897,8 +1046,10 @@ def launch_leg(project, task, kind, prompt):
             current_leg(s)["runner_pid"] = runner.pid
         project.update_state(task, set_pid)
     ex = project.config["executor"]
-    print(f"BATON::STARTED task={task} leg={n} kind={kind} model={ex['model']} "
-          f"effort={ex['reasoning_effort']} service_tier={ex['service_tier']} runner_pid={runner.pid}")
+    details = f"adapter={ex_adapter} model={ex.get('model') or 'default'}"
+    if ex_adapter == "codex":
+        details += f" effort={ex.get('reasoning_effort')} service_tier={ex.get('service_tier')}"
+    print(f"BATON::STARTED task={task} leg={n} kind={kind} {details} runner_pid={runner.pid}")
     print(f"回滚点：{start_ref or '无'}")
     print(f"下一步：用后台方式运行 `baton wait {task}`，leg 结束或 "
           f"{project.config['supervision']['interval_minutes']} 分钟监管时间到会唤醒你。")
@@ -914,8 +1065,8 @@ def cmd_start(project, args):
     if "（待填）" in brief or "{{TASK}}" in brief:
         die(f"简报里还有未填写的模板占位（「（待填）」或 {{{{TASK}}}}）：{brief_path}")
     st = read_json(project.state_path(args.task), {}) or {}
-    if st.get("thread_id"):
-        die(f"任务 {args.task} 已有 Codex 会话 {st['thread_id']}；继续请用 baton resume")
+    if st.get("thread_id") or st.get("session_id"):
+        die(f"任务 {args.task} 已有执行者会话 {st.get('session_id') or st.get('thread_id')}；继续请用 baton resume")
     if is_git(project.root):
         r = subprocess.run(["git", "check-ref-format", f"refs/baton/{args.task}/base"])
         if r.returncode != 0:
@@ -953,12 +1104,14 @@ def cmd_resume(project, args, message=None):
     project.require_init()
     message = message if message is not None else message_from(args)
     st = refresh_runner_liveness(project, args.task, project.load_state(args.task))
-    if not st.get("thread_id"):
+    adapter_name = st.get("executor_adapter") or ("codex" if st.get("thread_id") else baton_config.executor_adapter(project.config))
+    if not (st.get("session_id") or st.get("thread_id")):
         leg = current_leg(st)
-        tid = thread_id_from(leg["events"]) if leg else None
+        adapter = adapter_for(project, (leg or {}).get("executor_adapter") or adapter_name)
+        tid = adapter.thread_id(leg.get("events"), leg.get("events")) if leg else None
         if not tid:
-            die("找不到 Codex 会话 id，无法续跑；可能首轮没有成功启动，改用 baton start")
-        project.update_state(args.task, lambda s: s.update(thread_id=tid))
+            die("找不到执行者会话 id，无法续跑；可能首轮没有成功启动，改用 baton start")
+        project.update_state(args.task, lambda s: s.update(session_id=tid, thread_id=tid))
     cfg = project.config
     prompt = (f"[Baton 指挥 · {args.kind}]\n\n{message.strip()}\n\n"
               "（继续遵守 Baton 执行协议：小修改记 log，大修改写汇报后停下，"
@@ -993,7 +1146,7 @@ def _raise_terminated(signum, frame):
 
 
 def cmd_run(project, args):
-    """Internal: the detached leg runner. Always records a result, even when it is killed."""
+    """Internal: the detached leg runner. Always records a result, even when killed."""
     task, n = args.task, int(args.n)
     signal.signal(signal.SIGTERM, _raise_terminated)
     signal.signal(signal.SIGHUP, _raise_terminated)
@@ -1002,24 +1155,28 @@ def cmd_run(project, args):
     stop_flag = project.leg_path(task, n, "stop")
     proc, reason, error = None, None, None
     try:
+        adapter = adapter_for(project, leg.get("executor_adapter") or baton_config.executor_adapter(project.config))
+        env = adapter.prepare_env(project)
         with open(leg["prompt"], "rb") as fin, open(leg["events"], "wb") as fout, \
                 open(leg["stderr"], "wb") as ferr:
             proc = subprocess.Popen(leg["cmd"], cwd=project.root, stdin=fin, stdout=fout,
-                                    stderr=ferr, start_new_session=True)
+                                    stderr=ferr, start_new_session=True, env=env)
 
-        def set_codex(s):
+        def set_executor_pid(s):
+            current_leg(s)["executor_pid"] = proc.pid
+            # Keep the legacy field for old status consumers and state files.
             current_leg(s)["codex_pid"] = proc.pid
-        project.update_state(task, set_codex)
+        project.update_state(task, set_executor_pid)
 
         limit = float(project.config["supervision"].get("max_unsupervised_minutes") or 0)
         while proc.poll() is None:
             time.sleep(2)
             if proc.poll() is not None:
                 break  # finished on its own during the sleep: its result wins over a late stop
-            if not st.get("thread_id"):
-                tid = thread_id_from(leg["events"])
+            if not (st.get("session_id") or st.get("thread_id")):
+                tid = adapter.thread_id(leg["events"], leg["events"])
                 if tid:
-                    st = project.update_state(task, lambda s: s.update(thread_id=tid))
+                    st = project.update_state(task, lambda s: s.update(session_id=tid, thread_id=tid))
             if os.path.exists(stop_flag):
                 reason = "stopped"
                 _interrupt(proc)
@@ -1039,7 +1196,8 @@ def cmd_run(project, args):
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     rc = proc.wait() if proc is not None else -1
 
-    result = read_json(leg["last"])
+    adapter = adapter_for(project, leg.get("executor_adapter") or baton_config.executor_adapter(project.config))
+    result = adapter.parse_result(leg["last"], leg["events"], leg["stderr"])
     if result is not None and not isinstance(result, dict):
         result = {"status": "unknown", "summary": json.dumps(result, ensure_ascii=False)[:4000],
                   "artifact": "", "change_size": "unknown"}
@@ -1064,7 +1222,8 @@ def cmd_run(project, args):
         except Exception:  # noqa: BLE001
             diff = None
     events, _ = read_events(leg["events"])
-    dg = digest(events)
+    dg = digest(events) if adapter.name == "codex" else {"usage": {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}}
+    session_id = adapter.thread_id(leg["events"], leg["events"])
     log_size = file_size(project.p("log.md"))
     stderr_tail = read_text(leg["stderr"])[-1500:]
     notes = [x for x in (error if not finished_ok else None,
@@ -1075,18 +1234,22 @@ def cmd_run(project, args):
         lg = s["legs"][n - 1]
         lg.update(status=status, exit_code=rc, ended_at=now(), result=result, end_ref=end_ref,
                   diff=diff, usage=dg["usage"], log_grew=log_size > lg.get("log_size_at_start", 0),
-                  stderr_tail=stderr_tail if status == "failed" else "", codex_exited=True)
+                  stderr_tail=stderr_tail if status == "failed" else "",
+                  executor_exited=True, codex_exited=True)
         if notes:
             lg["error"] = "；".join(notes)
-        if not s.get("thread_id"):
-            s["thread_id"] = thread_id_from(lg["events"])
+        if session_id:
+            s["session_id"] = session_id
+            s["thread_id"] = session_id
+            lg["session_id"] = session_id
         s["status"] = "done" if status == "done" else "idle"
     project.update_state(task, finish)
     try:
         os.remove(stop_flag)
     except OSError:
         pass
-    safe_quota(block=True, notify=True)
+    if uses_codex(project, leg):
+        safe_quota(block=True, notify=True)
 
 
 def report_baseline(st, leg):
@@ -1130,9 +1293,10 @@ def leg_event_text(project, task, leg):
     if leg.get("stderr_tail"):
         lines.append("stderr 末尾：\n" + leg["stderr_tail"])
     lines.append(f"回滚点：{leg.get('start_ref') or '无'} → {leg.get('end_ref') or '无'}")
-    q = safe_quota(block=False)
-    if codex_quota.is_low(q):
-        lines.append(codex_quota.describe(q).splitlines()[0])
+    if uses_codex(project, leg):
+        q = safe_quota(block=False)
+        if codex_quota.is_low(q):
+            lines.append(codex_quota.describe(q).splitlines()[0])
     lines.append("下一步：" + NEXT_STEP.get(ev, "查看 baton status"))
     return "\n".join(lines)
 
@@ -1164,6 +1328,9 @@ def cmd_wait(project, args):
             return
         if now() - last_quota_check > 300:
             last_quota_check = now()
+            if not uses_codex(project, leg):
+                time.sleep(10)
+                continue
             data = safe_quota(block=True, notify=True)
             keys = codex_quota.low_window_keys(data)
             alerted = st.get("quota_alerted") or []
@@ -1184,18 +1351,23 @@ def cmd_status(project, args):
     cfg = project.config
     leg = current_leg(st)
     print(f"# Baton 状态 · {task} · {stamp()}")
-    print(f"任务状态：{st.get('status')}；Codex 会话：{st.get('thread_id') or '未知'}；共 {len(st.get('legs', []))} 轮")
+    print(f"任务状态：{st.get('status')}；执行者会话：{st.get('session_id') or st.get('thread_id') or '未知'}；"
+          f"adapter={st.get('executor_adapter') or baton_config.executor_adapter(cfg)}；共 {len(st.get('legs', []))} 轮")
     if not leg:
         return
     running = leg["status"] == "running"
     print(f"当前第 {leg['n']} 轮（{leg['kind']}）：{leg['status']}，已运行 {fmt_dur((leg.get('ended_at') or now()) - leg['started_at'])}"
-          + (f"，codex pid {leg.get('codex_pid')} {'存活' if codex_alive(leg) else '不在'}" if running else ""))
+          + (f"，executor pid {leg.get('executor_pid', leg.get('codex_pid'))} "
+             f"{'存活' if executor_alive(leg) else '不在'}" if running else ""))
     if leg["status"] != "running" and not leg.get("reported"):
         print(f"注意：这一轮已结束（{leg['status']}），事件还没被 baton wait 报告过。")
     last_sup = st.get("last_supervision_at", leg["started_at"])
     print(f"上次监管：{stamp(last_sup)}（{fmt_dur(now() - last_sup)} 前）；"
           f"自动暂停时限 {cfg['supervision'].get('max_unsupervised_minutes')} 分钟")
-    print(codex_quota.describe(safe_quota(block=True)))
+    if uses_codex(project, leg):
+        print(codex_quota.describe(safe_quota(block=True)))
+    else:
+        print("当前执行者未使用 Codex，额度不适用")
 
     sup = st.get("supervision") or {}
     same_leg = sup.get("leg") == leg["n"]
@@ -1572,6 +1744,9 @@ def cmd_list(project, args):
 
 
 def cmd_quota(project, args):
+    if baton_config.executor_adapter(project.config) != "codex":
+        print("当前执行者未使用 Codex，额度不适用")
+        return
     argv = (["--json"] if args.json else []) + (["--refresh"] if args.refresh else []) + ["--notify"]
     sys.exit(codex_quota.main(argv))
 
@@ -1612,29 +1787,64 @@ def cmd_doctor(project, args):
         nonlocal ok
         ok = ok and level != "FAIL"
         print(f"[{level}] {msg}")
-    codex = shutil.which("codex")
-    line("OK" if codex else "FAIL", f"codex CLI：{codex or '未安装'}")
-    if codex:
-        line("OK", run(["codex", "--version"], check=False).strip())
-    ex = project.config["executor"]
-    cache = read_json(os.path.expanduser("~/.codex/models_cache.json"), {})
-    models = cache.get("models", cache) if isinstance(cache, dict) else cache
-    model = next((m for m in models or [] if isinstance(m, dict) and m.get("slug") == ex["model"]), None)
-    if model:
-        efforts = [x.get("effort") for x in model.get("supported_reasoning_levels") or []]
-        line("OK" if ex["reasoning_effort"] in efforts else "FAIL",
-             f"模型 {ex['model']}，思考深度 {ex['reasoning_effort']}（可选：{'/'.join(efforts)}）")
+    cfg = project.config
+    conductor = baton_config.conductor_config(cfg)
+    judge = baton_config.judge_config(cfg)
+    ex = baton_config.executor_config(cfg)
+    line("OK", "指挥：{} · backend={} · profile={}{}".format(
+        conductor.get("label") or "未标注", conductor.get("backend") or "未指定",
+        conductor.get("profile") or "默认", " · model={}".format(conductor["model"]) if conductor.get("model") else ""))
+    stages = judge.get("stages") or {}
+    if judge.get("mode") not in baton_config.JUDGE_MODES:
+        line("FAIL", "裁判模式无效：{}".format(judge.get("mode")))
     else:
-        line("WARN", f"models_cache 里没找到 {ex['model']}（可能只是缓存未刷新）")
-    line("OK" if ex.get("service_tier") != "priority" and ex.get("disable_fast_mode") else "WARN",
-         f"service_tier={ex.get('service_tier')}，disable_fast_mode={ex.get('disable_fast_mode')}（加速模式应关闭）")
-    data = safe_quota(block=True)
-    desc = codex_quota.describe(data)
-    if codex_quota.is_low(data):
-        print(desc.splitlines()[0])
-        line("WARN", desc.splitlines()[-1])
+        invalid = [s for s in baton_config.JUDGE_STAGES if stages.get(s, judge.get("mode")) not in baton_config.JUDGE_MODES]
+        line("FAIL" if invalid else "OK", "裁判：mode={}；决策={}，审阅={}，最终验收={}".format(
+            judge.get("mode"), stages.get("decision", judge.get("mode")), stages.get("review", judge.get("mode")),
+            stages.get("final", judge.get("mode"))))
+    councilors = (judge.get("council") or {}).get("councilors") or []
+    if any(stages.get(s, judge.get("mode")) == "council" for s in baton_config.JUDGE_STAGES):
+        line(*council_check())
+        line("OK" if councilors else "WARN", "council 顾问：{}".format(
+            ", ".join(str(x.get("name") if isinstance(x, dict) else x) for x in councilors) or "未配置"))
+    adapter_name = baton_config.executor_adapter(cfg)
+    executor_cmd = ex.get("command") or adapter_name
+    line("OK" if shutil.which(str(executor_cmd).split()[0]) else "FAIL",
+         "执行者：adapter={} · model={} · command={}".format(adapter_name, ex.get("model") or "默认", executor_cmd))
+    if adapter_name == "codex":
+        codex = shutil.which("codex")
+        line("OK" if codex else "FAIL", f"codex CLI：{codex or '未安装'}")
+        if codex:
+            line("OK", run(["codex", "--version"], check=False).strip())
+        cache = read_json(os.path.expanduser("~/.codex/models_cache.json"), {})
+        models = cache.get("models", cache) if isinstance(cache, dict) else cache
+        model = next((m for m in models or [] if isinstance(m, dict) and m.get("slug") == ex.get("model")), None)
+        if model:
+            efforts = [x.get("effort") for x in model.get("supported_reasoning_levels") or []]
+            line("OK" if ex.get("reasoning_effort") in efforts else "FAIL",
+                 f"模型 {ex.get('model')}，思考深度 {ex.get('reasoning_effort')}（可选：{'/'.join(efforts)}）")
+        else:
+            line("WARN", f"models_cache 里没找到 {ex.get('model')}（可能只是缓存未刷新）")
+        line("OK" if ex.get("service_tier") != "priority" and ex.get("disable_fast_mode") else "WARN",
+             f"service_tier={ex.get('service_tier')}，disable_fast_mode={ex.get('disable_fast_mode')}（加速模式应关闭）")
+        data = safe_quota(block=True)
+        desc = codex_quota.describe(data)
+        if codex_quota.is_low(data):
+            print(desc.splitlines()[0])
+            line("WARN", desc.splitlines()[-1])
+        else:
+            line("OK" if data and data.get("source") == "live" else "WARN", desc.splitlines()[-1])
     else:
-        line("OK" if data and data.get("source") == "live" else "WARN", desc.splitlines()[-1])
+        line("OK", "非 Codex 执行者，不检查 Codex 登录、models_cache 或额度")
+        try:
+            adapter_view = adapters.ClaudeAdapter(ex)
+            allowed = ex["allowed_tools"] if "allowed_tools" in ex else adapter_view._default_allowed_tools(project)
+            if isinstance(allowed, str):
+                allowed = [allowed]
+            allowed = adapter_view._network_safe_tools(allowed, ex)
+            line("OK", "Claude 工具白名单：{}".format(", ".join(allowed) or "（空）"))
+        except Exception as exc:  # noqa: BLE001 — doctor should report, not abort
+            line("WARN", "Claude 工具白名单生成失败：{}".format(exc))
     launcher = os.path.realpath(os.path.join(SKILL_DIR, "bin", "baton"))
     on_path = shutil.which("baton")
     if not on_path:
@@ -1644,10 +1854,11 @@ def cmd_doctor(project, args):
     else:
         line("OK", f"baton 命令：{on_path}")
     council = os.path.join(council_dir(), "scripts", "launch.sh")
-    line("OK" if os.path.exists(council) else "WARN",
-         "council skill：" + ("已安装" if os.path.exists(council) else f"未安装（{council_dir()}，./install.sh --council）"))
-    if os.path.exists(council):
-        line(*council_check())
+    if not any(stages.get(s, judge.get("mode")) == "council" for s in baton_config.JUDGE_STAGES):
+        line("OK", "council skill：当前阶段未启用")
+    else:
+        line("OK" if os.path.exists(council) else "WARN",
+             "council skill：" + ("已安装" if os.path.exists(council) else f"未安装（{council_dir()}，./install.sh --council）"))
     line("OK" if is_git(project.root) else "WARN", f"项目 {project.root}：" + ("git 仓库" if is_git(project.root) else "非 git，无回滚点"))
     line("OK" if os.path.isdir(project.dir) else "WARN", ".baton/：" + ("已初始化" if os.path.isdir(project.dir) else "未初始化（baton init）"))
     sl = statusline_report(project).splitlines()[0]
@@ -1659,12 +1870,41 @@ def cmd_doctor(project, args):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="baton", description="Claude 指挥、Codex 执行的工作流工具")
+    ap = argparse.ArgumentParser(prog="baton", description="conductor/judge/executor multi-agent 工作流工具")
     ap.add_argument("--root", help="项目目录（默认：当前目录所在 git 仓库根）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("init", help="在项目里创建 .baton/，并配置带 Codex 额度的 statusline")
     s.add_argument("--no-statusline", action="store_true", help="不改项目的 statusline")
-    s = sub.add_parser("statusline", help="项目 statusline 的 Codex 额度行")
+    s = sub.add_parser("setup", help="配置指挥、裁判和执行者（非 TTY 必须提供参数）")
+    s.add_argument("--scope", choices=["project", "user"], default="project",
+                   help="写入项目 .baton/config.json 或用户级 ~/.config/baton/config.json")
+    s.add_argument("--preset", choices=["default", "deepseek-council", "kimi-claude"])
+    s.add_argument("--conductor-label")
+    s.add_argument("--conductor-backend")
+    s.add_argument("--conductor-model")
+    s.add_argument("--conductor-profile")
+    s.add_argument("--judge-mode", choices=list(baton_config.JUDGE_MODES))
+    s.add_argument("--judge-decision", choices=list(baton_config.JUDGE_MODES))
+    s.add_argument("--judge-review", choices=list(baton_config.JUDGE_MODES))
+    s.add_argument("--judge-final", choices=list(baton_config.JUDGE_MODES))
+    s.add_argument("--judge-councilor", action="append",
+                   help="NAME[:adapter[:model[:profile]]]；可重复")
+    s.add_argument("--executor-adapter", choices=list(baton_config.ADAPTERS))
+    s.add_argument("--executor-model")
+    s.add_argument("--executor-reasoning-effort")
+    s.add_argument("--executor-service-tier")
+    s.add_argument("--executor-sandbox")
+    s.add_argument("--executor-network-access", choices=["true", "false", "yes", "no", "1", "0"])
+    s.add_argument("--executor-disable-fast-mode", choices=["true", "false", "yes", "no", "1", "0"])
+    s.add_argument("--executor-command")
+    s.add_argument("--executor-profile")
+    s.add_argument("--executor-config-dir")
+    s.add_argument("--executor-env-file")
+    s.add_argument("--executor-permission-mode")
+    s.add_argument("--executor-inherit-env", choices=["true", "false", "yes", "no", "1", "0"])
+    s.add_argument("--executor-allowed-tool", action="append", help="允许的 Claude tool；可重复")
+    s.add_argument("--executor-extra-arg", action="append", help="执行者额外参数；可重复")
+    s = sub.add_parser("statusline", help="项目 statusline；仅 Codex executor 显示额度行")
     s.add_argument("action", nargs="?", default="status", choices=["install", "uninstall", "status"])
     s.add_argument("--force", action="store_true", help="settings.local.json 被 git 跟踪或指向项目外时也安装")
     s = sub.add_parser("new", help="新建任务并生成简报模板")
@@ -1715,7 +1955,7 @@ def main():
     args = ap.parse_args()
     project = Project(args.root or find_root(os.getcwd()))
     handler = {
-        "init": cmd_init, "statusline": cmd_statusline, "new": cmd_new, "start": cmd_start,
+        "init": cmd_init, "setup": cmd_setup, "statusline": cmd_statusline, "new": cmd_new, "start": cmd_start,
         "resume": cmd_resume, "steer": cmd_steer, "wait": cmd_wait, "status": cmd_status,
         "supervised": cmd_supervised, "stop": cmd_stop, "checkpoint": cmd_checkpoint, "refs": cmd_refs,
         "diff": cmd_diff, "rollback": cmd_rollback, "list": cmd_list, "quota": cmd_quota,

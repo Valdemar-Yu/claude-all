@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Baton statusline: the statusline the project had before, plus one line for Codex quota.
+"""Baton statusline: the statusline the project had before, plus Codex quota when applicable.
 
 `baton init` installs this script as the project's statusLine (.claude/settings.local.json).
 The first line comes from the statusline that setting overrides, resolved in this order:
 $BATON_BASE_STATUSLINE (empty string = none), the project-local statusLine saved by
 `baton init` (.baton/statusline-saved.json), the project's .claude/settings.json, and
 finally the user's ~/.claude/settings.json. It receives the same stdin JSON.
-The Codex line never blocks: it renders cached data and refreshes in the background.
+The Codex line never blocks: it renders cached data and refreshes in the background. Claude
+executors keep the original statusline and do not query Codex quota.
 """
 import json
 import os
@@ -17,6 +18,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import codex_quota  # noqa: E402
+import baton_config  # noqa: E402
 
 MARK = "--baton-statusline"
 GUARD = "BATON_STATUSLINE_ACTIVE"
@@ -73,13 +75,13 @@ def project_dir_of(session):
 
 
 def executor_config(session):
-    cfg = codex_quota.skill_config().get("executor", {})
+    project = project_dir_of(session)
+    skill = os.path.join(HERE, "..", "config.json")
     try:
-        with open(os.path.join(project_dir_of(session), ".baton", "config.json")) as f:
-            cfg = {**cfg, **(json.load(f).get("executor") or {})}
+        cfg = baton_config.load_config(skill, os.path.join(project, ".baton", "config.json"))
+        return baton_config.executor_config(cfg)
     except Exception:
-        pass
-    return cfg
+        return codex_quota.skill_config().get("executor", {})
 
 
 def bar(remaining, width=10):
@@ -98,6 +100,8 @@ def short_reset(ts):
 
 def codex_line(session):
     ex = executor_config(session)
+    if str(ex.get("adapter") or "codex").lower() != "codex":
+        return None
     head = c(f"Codex {ex.get('model', '?')}·{ex.get('reasoning_effort', '?')}", "36")
     data = codex_quota.get(block=False)
     if not data or not data.get("windows"):
@@ -149,7 +153,9 @@ def main():
         except Exception:
             pass
     try:
-        lines.append(codex_line(session))
+        quota = codex_line(session)
+        if quota:
+            lines.append(quota)
     except Exception:
         lines.append("Codex 额度：读取失败")
     sys.stdout.write("\n".join(lines) + "\n")
