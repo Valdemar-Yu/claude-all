@@ -1,22 +1,21 @@
 ---
 name: baton
 description: >-
-  Claude（Opus 5.5）当指挥和裁判，在终端里通过 Codex CLI 让 GPT-6.1-Sol（思考深度 xhigh，不开加速）执行编码任务。
-  负责写任务简报、后台启动 codex exec、每 30 分钟监管防止执行者跑偏或改坏代码、处理执行者提交的决策请求（重大决策用 council skill）、
-  审阅执行者每次大修改后写的 HTML 汇报、检查小修改是否记入 log，Codex 额度低于 5% 时提醒用户。
-  触发：让 codex 干活、指挥 codex、交给 codex / GPT 执行、Claude 监工 Codex、/baton、delegate to codex。
+  可配置的 conductor/judge/executor multi-agent 编码工作流。默认 Claude Opus 指挥、conductor 自裁决、Codex GPT-6.1-Sol 执行；也支持
+  DeepSeek/Kimi/GLM 等 claude-all profile、Claude executor 和 council.skill 合议。负责写简报、后台运行执行者、处理决策与审阅、监管和最终验收。
+  触发：/baton、multi-agent、让执行者改代码、配置 conductor/judge/executor。
 ---
 
-# Baton：Opus 指挥，Codex 执行
+# Baton：conductor、judge、executor
 
-你（主会话，应当是 Opus 5.5）是指挥和裁判：定方案、做决策、审阅、监管，不亲手写任务代码。执行者是 Codex CLI 里的 `gpt-6.1-sol`，思考深度 `xhigh`，`service_tier="default"` 且禁用 `fast_mode`（不开加速）。这些参数在 `${CLAUDE_SKILL_DIR}/config.json`，项目可在 `.baton/config.json` 覆盖。
+你是 conductor：定方案、写简报、发消息和监管。judge 可以是 conductor 自己，也可以在每个阶段调用 [council.skill](https://github.com/ParadoxZW/council.skill)；executor 通过 `roles.executor.adapter` 选择 Codex 或 headless Claude。默认配置仍是 Codex `gpt-6.1-sol`、`xhigh`、默认 service tier、关闭 fast mode。这些参数在 `${CLAUDE_SKILL_DIR}/config.json`，项目可在 `.baton/config.json` 覆盖。主会话不要求是 Opus；doctor/启动输出显示配置的 conductor 身份。
 
 命令行工具是 `baton`（`${CLAUDE_SKILL_DIR}/bin/baton`，`install.sh` 会链接到 `~/.local/bin/baton`）。在目标项目目录下运行。`baton doctor` 提示 PATH 上的 baton 不是本 skill 的时，改用 `${CLAUDE_SKILL_DIR}/bin/baton`。
 
 ## 启动
 
-1. 自检：`baton doctor`。有 FAIL 先解决。主会话不是 Opus 时提醒用户切换（`/model opus`）。
-2. 初始化：`baton init`（可重复执行）。它同时配置本项目的 statusline：把 `.claude/settings.local.json` 的 statusLine 换成 Baton 的包装脚本，原来的 statusline 保留为第一行，第二行显示 Codex 额度；输出里说需要重开会话时转告用户。用户不想改 statusline 就用 `baton init --no-statusline`。项目有测试命令就写进 `.baton/config.json` 的 `supervision.test_command`。任务需要联网（装依赖、下载数据）时把 `executor.network_access` 设为 `true`，并告诉用户。
+1. 自检：`baton doctor`。有 FAIL 先解决；确认 conductor、judge 三阶段和 executor adapter 与任务一致。
+2. 初始化：`baton init`（可重复执行）。它配置项目 statusline；Codex executor 显示第二行额度，Claude executor 只保留原 statusline。项目有测试命令就写进 `.baton/config.json` 的 `supervision.test_command`，Claude 默认工具白名单会从它生成。任务需要联网时按适配器配置网络和工具权限，并告诉用户。
 3. 写简报：先读必要的代码弄清现状，再 `baton new <task>`，填满 `.baton/tasks/<task>/brief.md` 每一节，不留「（待填）」。验收标准要能检查，范围写清允许和禁止修改的路径。需求有歧义先问用户。把简报要点用两三句告诉用户。
 4. 启动：`baton start <task>`。
 5. 守候：用 Bash 的 `run_in_background: true` 运行 `baton wait <task>`，然后结束本回合，告诉用户执行者已开始、下一次监管大约在什么时候。不要在前台 sleep 轮询；`wait` 结束时你会被唤醒。
@@ -38,7 +37,7 @@ description: >-
 | `QUOTA_LOW` | 立即提醒用户（剩余百分比、重置时间、可用重置券），然后继续后台 `wait`；用户没说停就不停 |
 | `IDLE` | 当前没有运行中的轮次 |
 
-处理完后，只要有轮次在运行（或你刚 `resume`/`steer` 过），就重新后台 `baton wait <task>`。没有 `wait` 在跑就没有监管。
+处理完后，只要有轮次在运行（或你刚 `resume`/`steer` 过），就重新后台 `baton wait <task>`。没有 `wait` 在跑就没有监管。决策、REPORT、DONE 三个阶段分别读取 `roles.judge.stages.decision/review/final`；值为 `council` 时按 references/decision.md 或 review.md 调用 council.skill，值为 `conductor` 时由主会话直接裁决。
 
 `resume`、`steer`、`stop` 发现上一轮已经自己结束、而事件还没被报告过时，会先打印那个事件（`resume`/`steer` 以退出码 4 停下）。这时先按事件处理，处理完再执行同一条命令。
 
@@ -52,16 +51,27 @@ description: >-
 - 用户要离开时提醒：执行者在独立进程里继续跑，但关闭本会话后没人监管，超过 70 分钟无监管会自动暂停。
 - 给用户的进度汇报保持简短：事件、结论、下一步。
 
+常用配置：
+
+```bash
+baton setup --preset default             # 默认 Claude Opus + conductor judge + Codex
+baton setup --preset deepseek-council    # DeepSeek conductor + council judge + Codex
+baton setup --preset kimi-claude          # Kimi conductor + claude-all GLM executor
+```
+
+Claude executor 没有 Codex 的 OS 沙箱。默认 `permission_mode=acceptEdits`，`allowed_tools` 缺省时按 `supervision.test_command` 生成并排除网络安装命令；`bypassPermissions` 只有显式配置才会加入命令。普通 `claude` executor 清理继承的第三方环境变量，`inherit_env=true` 才保留；`claude-all` executor 交给 claude-all 自己隔离。
+
 ## 命令速查
 
 | 命令 | 作用 |
 |---|---|
-| `baton doctor` | 环境自检：codex、模型与思考深度、加速是否关闭、额度、council、git |
-| `baton init [--no-statusline]` | 创建 `.baton/`，配置带 Codex 额度行的项目 statusline |
+| `baton doctor` | 环境自检：conductor、judge、executor、Claude 工具白名单、council、git；只有 Codex executor 查额度 |
+| `baton setup [--preset ...]` | 配置三角色；TTY 会列出 claude-all profile 名与 label |
+| `baton init [--no-statusline]` | 创建 `.baton/`，按 executor adapter 配置项目 statusline |
 | `baton statusline install/uninstall/status` | 单独安装、撤销、查看项目 statusline；settings.local.json 被 git 跟踪时默认不改，需 `--force` |
 | `baton new <task>` | 生成简报模板 |
-| `baton start <task>` | 首轮：`codex exec`，建回滚点，后台运行 |
-| `baton resume <task> <file> --kind 决策/审阅/纠偏` | 带指挥消息续跑：`codex exec resume <thread>` |
+| `baton start <task>` | 首轮：按 adapter 启动 executor，建回滚点，后台运行 |
+| `baton resume <task> <file> --kind 决策/审阅/纠偏` | 带消息续跑：Codex `exec resume` 或 Claude `--resume` |
 | `baton wait <task>` | 阻塞到下一个事件（必须后台运行） |
 | `baton status <task>` | 监管快照 |
 | `baton supervised <task> --verdict on_track/drifting/breaking --note ...` | 记录监管结论、建回滚点、重置 30 分钟计时 |

@@ -106,7 +106,7 @@ bash ~/.local/share/claude-all/lib/patch-claudish.sh --statusline-only
 
 ## Baton 没有出现在菜单 / `claude-all baton` 提示未安装
 
-**根因**:`CCGP_BATON=auto` 只在安装器检测到 `codex` CLI 时安装 Baton。Baton 还需要官方 Claude 订阅和已经登录的 Codex CLI。
+**根因**:`CCGP_BATON=auto` 只在安装器检测到 `codex` CLI 时自动安装 Baton。Codex executor 需要 Codex CLI 和登录态；Claude executor 不需要 Codex，但仍需要对应 Claude/claude-all profile 的登录态。
 
 **诊断**:
 
@@ -125,7 +125,9 @@ CCGP_BATON=yes ./install.sh
 claude-all baton "检查当前任务"
 ```
 
-`claude-all baton` 只使用官方 profile，并传 `--model opus`。缺少官方 `claude.env` 时重新运行 `./install.sh`，缺少 Codex 时先登录 Codex。若安装时不需要 Baton，设置 `CCGP_BATON=no`。
+`claude-all baton` 默认使用配置里的 `roles.conductor.profile`；没有配置时才使用官方 profile 和 `--model opus`。可用 `claude-all baton --conductor deepseek "任务"` 临时覆盖，或用 `baton setup` 写入配置。只有配置的 executor adapter 是 Codex 时才需要 Codex CLI；Claude executor 的 headless 权限由 `permission_mode` 和 `allowed_tools` 控制，没有 OS 沙箱。
+
+`baton doctor` 会显示三个角色、Claude 最终工具白名单和 council 状态。`bypassPermissions` 只有在配置中显式写出才会生效；`network_access=false` 时默认白名单会排除 curl、wget 和安装依赖命令。
 
 ## Baton 项目看不到 Codex 额度行
 
@@ -138,7 +140,7 @@ baton doctor
 claude-all doctor
 ```
 
-如果项目确实需要额度行，在项目根目录运行 `baton init` 后重开会话。分发器只接受 realpath 指向全局或 vendored Baton 的固定脚本命令，普通项目、解析失败或不受信任的同名脚本都会回退原 claude-all statusline。
+如果项目确实需要额度行，在项目根目录运行 `baton init` 后重开会话。额度行只属于 Codex executor；Claude executor 不查询 Codex quota，分发器会保留原 statusline。分发器只接受 realpath 指向全局或 vendored Baton 的固定脚本命令，普通项目、解析失败或不受信任的同名脚本都会回退原 claude-all statusline。
 
 **撤销**:
 
@@ -150,10 +152,10 @@ baton statusline uninstall
 
 ## 需要同步上游 Baton
 
-vendor 版本的仓库、commit 和补丁清单在 `baton/UPSTREAM`。给同步脚本一个本地 Baton checkout，它只读 Git 跟踪文件，工作区有未提交改动会拒绝同步：
+vendor 版本的仓库、commit 和补丁清单在 `baton/UPSTREAM`。这是基于上游 91f5d2c 的 claude-all multi-agent 分支；`--check` 会报告差异而不是要求逐文件一致。给同步脚本一个本地 Baton checkout，它只读 Git 跟踪文件，工作区有未提交改动会拒绝同步：
 
 ```bash
 scripts/sync-baton.sh --check /path/to/Baton
 ```
 
-确认差异后再去掉 `--check` 写入 vendor。同步不会联网安装第三方 council.skill；若本机还没有 council，安装输出会提示运行 `~/.local/share/claude-all/baton/install.sh --council`，自定义 `CCGP_PREFIX` 时把前缀替换成对应目录。这一步会联网 clone 第三方仓库。
+确认差异后再去掉 `--check` 写入 vendor。同步不会联网安装第三方 council.skill；若本机还没有 council，安装输出会提示运行 `~/.local/share/claude-all/baton/install.sh --council`，自定义 `CCGP_PREFIX` 时把前缀替换成对应目录。这一步会联网 clone 第三方仓库。已有 council 或 `council-def.sh` 时，Baton 会旁写 `config.baton.json` / `council-def.baton.sh`，不会覆盖已有配置。

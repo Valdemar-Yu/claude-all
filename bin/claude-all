@@ -659,25 +659,130 @@ choose_menu() {
   SELECTED_PROFILE="${profiles[$selected]}"
 }
 
+_baton_role_info() {
+  local cli skill_dir project_cfg="${PWD}/.baton/config.json"
+  cli="$(_claude_all_baton_cli 2>/dev/null || true)"
+  [ -n "$cli" ] || return 1
+  skill_dir="$(cd -P "$(dirname "$cli")/.." >/dev/null 2>&1 && pwd)"
+  python3 - "$skill_dir/config.json" "$project_cfg" <<'PY'
+import json, os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(sys.argv[1]), "scripts"))
+import baton_config
+cfg = baton_config.load_config(sys.argv[1], sys.argv[2] if os.path.exists(sys.argv[2]) else None)
+con = baton_config.conductor_config(cfg)
+ex = baton_config.executor_config(cfg)
+print("\t".join(str(x or "") for x in (
+    con.get("label"), con.get("backend"), con.get("profile"), con.get("model"),
+    ex.get("adapter"), ex.get("command"))))
+PY
+}
+
+_baton_profile_candidates() {
+  local info label backend profile model adapter command
+  info="$(_baton_role_info 2>/dev/null || true)"
+  IFS=$'\t' read -r label backend profile model adapter command <<EOF_INFO
+$info
+EOF_INFO
+  local p
+  for p in "${profiles[@]}"; do
+    printf '%s\n' "$p"
+  done
+}
+
+baton_choose_conductor() {
+  local task="$1" info label backend configured_profile model adapter command default_idx=0
+  local items=() p configure_idx selected_profile
+  info="$(_baton_role_info 2>/dev/null || true)"
+  IFS=$'\t' read -r label backend configured_profile model adapter command <<EOF_INFO
+$info
+EOF_INFO
+  for p in "${profiles[@]}"; do items+=("$(label_of "$p")"); done
+  configure_idx="${#items[@]}"
+  items+=("配置角色（运行 baton setup）")
+  for (( p=0; p<${#profiles[@]}; p++ )); do
+    [ "${profiles[$p]}" = "$configured_profile" ] && default_idx="$p"
+  done
+  if [ -z "$configured_profile" ] && [ -f "$PROFILES_DIR/claude.env" ]; then
+    for (( p=0; p<${#profiles[@]}; p++ )); do [ "${profiles[$p]}" = claude ] && default_idx="$p"; done
+  fi
+  _select_one "选择 Baton 指挥 profile" "$default_idx" yes "${items[@]}" || return 1
+  selected_profile="${items[$SELECTED_INDEX]}"
+  if [ "$SELECTED_INDEX" -eq "$configure_idx" ]; then
+    local cli
+    cli="$(_claude_all_baton_cli 2>/dev/null || true)"
+    [ -n "$cli" ] || die "当前安装没有 Baton CLI"
+    "$cli" setup
+    baton_start "$task"
+    return $?
+  fi
+  if [ "${profiles[$SELECTED_INDEX]}" = "claude" ] && [ -z "$configured_profile" ]; then
+    baton_start_with_profile claude "$task" "${model:-opus}"
+  else
+    baton_start_with_profile "${profiles[$SELECTED_INDEX]}" "$task" "$model"
+  fi
+}
+
 baton_quick_check() {
-  local cli source
+  local cli source info label backend configured_profile model adapter command
   command -v _claude_all_baton_cli >/dev/null 2>&1 || die "当前安装没有 Baton；请重新安装或设置 CCGP_BATON=yes。"
   cli="$(_claude_all_baton_cli 2>/dev/null || true)"
   [ -n "$cli" ] && [ -x "$cli" ] || die "当前安装没有可执行的 Baton CLI；请安装 Baton。"
   source="$(_claude_all_baton_cli_source 2>/dev/null || true)"
   [ "$source" = vendored ] || [ "$source" = user ] || die "PATH 上的 baton 不是 Baton：$cli"
-  command -v codex >/dev/null 2>&1 || die "Baton 需要 PATH 上可用的 codex CLI；请安装并登录 Codex。"
-  [ -f "$PROFILES_DIR/claude.env" ] || die "缺少官方 Claude profile：$PROFILES_DIR/claude.env；请重新运行 ./install.sh（或 README 中的 curl 安装命令）。"
+  info="$(_baton_role_info 2>/dev/null || true)"
+  IFS=$'\t' read -r label backend configured_profile model adapter command <<EOF_INFO
+$info
+EOF_INFO
+  if [ "${adapter:-codex}" = codex ]; then
+    command -v codex >/dev/null 2>&1 || die "Baton 的 Codex 执行者需要 PATH 上可用的 codex CLI；请安装并登录 Codex。"
+  fi
+  if [ -n "$configured_profile" ]; then
+    [ -f "$PROFILES_DIR/$configured_profile.env" ] || die "Baton 配置的指挥 profile 不存在：$PROFILES_DIR/$configured_profile.env"
+  elif [ "${backend:-claude-code}" = claude-code ]; then
+    [ -f "$PROFILES_DIR/claude.env" ] || die "缺少官方 Claude profile：$PROFILES_DIR/claude.env；请重新运行 ./install.sh（或 README 中的 curl 安装命令）。"
+  fi
+}
+
+baton_start_with_profile() {
+  local profile="$1" task="$2" model="$3"; shift 3 || true
+  [ -n "$profile" ] || profile=claude
+  if [ -n "$task" ]; then task="/baton $task"; fi
+  if [ -n "$model" ]; then
+    launch "$profile" --model "$model" "$task"
+  else
+    launch "$profile" "$task"
+  fi
 }
 
 baton_start() {
-  local task=""
+  local task="" conductor_override="" arg info label backend configured_profile model adapter command
   baton_quick_check
-  if [ "$#" -gt 0 ]; then task="/baton $*"; fi
-  if [ -n "$task" ]; then
-    launch claude --model opus "$task"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --conductor) [ "$#" -ge 2 ] || die "--conductor 需要 profile"; conductor_override="$2"; shift 2 ;;
+      --conductor=*) conductor_override="${1#*=}"; shift ;;
+      *) task="${task:+$task }$1"; shift ;;
+    esac
+  done
+  info="$(_baton_role_info 2>/dev/null || true)"
+  IFS=$'\t' read -r label backend configured_profile model adapter command <<EOF_INFO
+$info
+EOF_INFO
+  if [ -n "$conductor_override" ]; then
+    [ -f "$PROFILES_DIR/$conductor_override.env" ] || die "未知指挥 profile：$conductor_override"
+    baton_start_with_profile "$conductor_override" "$task" ""
+    return $?
+  fi
+  if [ -t 0 ] && [ -t 1 ] && [ "${#profiles[@]}" -gt 0 ]; then
+    baton_choose_conductor "$task"
+    return $?
+  fi
+  if [ -n "$configured_profile" ]; then
+    baton_start_with_profile "$configured_profile" "$task" "$model"
+  elif [ -f "$PROFILES_DIR/claude.env" ]; then
+    baton_start_with_profile claude "$task" "${model:-opus}"
   else
-    launch claude --model opus
+    die "没有可用的指挥 profile"
   fi
 }
 

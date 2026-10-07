@@ -1,8 +1,8 @@
-# 审阅大修改汇报与最终验收
+# 审阅大修改汇报与最终验收（judge stages: review/final）
 
 ## REPORT：审阅汇报
 
-1. 读事件里给出的汇报 HTML。
+1. 读事件里给出的汇报 HTML。`roles.judge.stages.review=conductor` 时由 conductor 直接审阅；为 `council` 时按 decision.md 的 council.skill 流程召集合议。
 2. 核对汇报与事实：
    - `baton diff <task> --since report --stat` 对照汇报的改动清单。`--since report` 的起点是上一次交汇报那一轮的终点（没有就是任务起点），中间经过决策、纠偏的轮次都算在内；REPORT 事件里「自上次汇报以来」一行是同一个统计。diff 里的每个文件都应出现在汇报中，汇报没提到的文件要追问。行数以 baton 的统计为准，执行者在沙箱里只能拿到相对 HEAD 的累计数和新文件的 `wc -l`，数字对不上不算问题。
    - `baton diff <task> --since report` 读关键 diff，先看汇报里「请指挥重点审阅」列出的位置。
@@ -31,7 +31,7 @@
 
 ## DONE：最终验收
 
-1. `baton diff <task> --since base --stat` 和关键 diff，看整个任务的改动。
+1. `baton diff <task> --since base --stat` 和关键 diff，看整个任务的改动。`roles.judge.stages.final` 决定由 conductor 还是 council 裁决。
 2. 对照简报的验收标准逐条检查，验证命令自己跑。
 3. 写 `.baton/reviews/<task>-final.md`：每条验收标准是否满足、验证结果、遗留问题、回滚点（`baton refs <task>`）。
 4. 有不满足的验收标准：写指令后 `baton resume <task> <文件> --kind 审阅`，继续守候。

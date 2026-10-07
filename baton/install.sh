@@ -7,7 +7,8 @@
 #
 # The Codex quota statusline is configured per project by `baton init` (or `baton statusline install`).
 # Re-running is safe: an existing non-symlink skill dir, a `baton` command that is not Baton's,
-# an existing council setup and an existing council-def.sh are all left alone.
+# an existing council setup and an existing council-def.sh are all left alone.  Generated
+# Baton council files are written beside existing files instead of overwriting them.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,24 +45,38 @@ install_skill() {
 
 install_council() {
   local dst="${SKILLS_DIR}/council"
+  local generated_tmp generated_config generated_def
+  generated_tmp=$(mktemp -d)
+  generated_config="${generated_tmp}/config.baton.json"
+  generated_def="${generated_tmp}/council-def.baton.sh"
+  python3 "${SKILL_SRC}/scripts/council_gen.py" --source "${SKILL_SRC}/config.json" \
+    --config-output "${generated_config}" --def-output "${generated_def}" >/dev/null
   if [[ -d "${dst}" ]]; then
-    echo "council 已安装：${dst}（保留原配置；要用 Baton 的顾问组合，参考 ${REPO}/council/config.json）"
+    if [[ -e "${dst}/config.json" ]]; then
+      cp "${generated_config}" "${dst}/config.baton.json"
+      echo "council 已安装：${dst}（保留原 config.json；Baton 配置旁写 ${dst}/config.baton.json）"
+    else
+      cp "${generated_config}" "${dst}/config.json"
+      echo "council ${dst}（使用 Baton 角色配置）"
+    fi
   else
     mkdir -p "${SKILLS_DIR}"
     BATON_CLONE_TMP=$(mktemp -d)
     git clone --depth 1 -q https://github.com/ParadoxZW/council.skill "${BATON_CLONE_TMP}/council.skill"
     cp -R "${BATON_CLONE_TMP}/council.skill/skills/council" "${dst}"
     cp "${dst}/config.json" "${dst}/config.json.orig"
-    cp "${REPO}/council/config.json" "${dst}/config.json"
+    cp "${generated_config}" "${dst}/config.json"
     rm -rf "${BATON_CLONE_TMP}"
     BATON_CLONE_TMP=""
-    echo "council ${dst}（顾问：council-cc-opus + council-codex-sol；原始配置在 config.json.orig）"
+    echo "council ${dst}（由 Baton 角色配置生成；原始配置在 config.json.orig）"
   fi
   if [[ -e "${COUNCIL_DEF}" ]]; then
-    echo "保留已有 ${COUNCIL_DEF}"
+    cp "${generated_def}" "${COUNCIL_DEF}.baton.sh"
+    echo "保留已有 ${COUNCIL_DEF}；Baton 后端旁写 ${COUNCIL_DEF}.baton.sh"
+    echo "如需启用：cat ${COUNCIL_DEF}.baton.sh >> ${COUNCIL_DEF}"
   else
     mkdir -p "$(dirname "${COUNCIL_DEF}")"
-    cp "${REPO}/council/council-def.sh" "${COUNCIL_DEF}"
+    cp "${generated_def}" "${COUNCIL_DEF}"
     echo "backend ${COUNCIL_DEF}"
   fi
   # every councilor named in the active config must be a function in council-def.sh
@@ -81,9 +96,10 @@ print(" ".join(n))' "${dst}/config.json" 2>/dev/null || echo "")
   missing=$(bash -c 'source "$1" >/dev/null 2>&1; shift; for f in "$@"; do type "$f" >/dev/null 2>&1 || echo "$f"; done' _ "${COUNCIL_DEF}" ${names})
   if [[ -n "${missing}" ]]; then
     echo "注意：${COUNCIL_DEF} 里没有定义这些顾问：$(echo ${missing})" >&2
-    echo "      把 ${REPO}/council/council-def.sh 整个文件追加到 ${COUNCIL_DEF} 末尾即可（函数自带默认值，不会覆盖你已有的设置）" >&2
+    echo "      把 ${COUNCIL_DEF}.baton.sh 追加到 ${COUNCIL_DEF} 末尾即可（函数自带默认值，不会覆盖你已有的设置）" >&2
     STATUS=1
   fi
+  rm -rf "${generated_tmp}"
 }
 
 [[ $# -eq 0 ]] && set -- --skill

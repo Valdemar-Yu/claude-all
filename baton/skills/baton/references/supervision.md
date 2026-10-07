@@ -1,6 +1,6 @@
 # 30 分钟监管检查
 
-触发：`baton wait` 输出 `TICK` 或 `PAUSED_UNSUPERVISED`。目的是尽早发现执行者走偏或把代码改坏。检查控制在几分钟内，不重做执行者的工作。
+触发：`baton wait` 输出 `TICK` 或 `PAUSED_UNSUPERVISED`。conductor/judge 的目的是尽早发现执行者走偏或把代码改坏。检查控制在几分钟内，不重做执行者的工作。
 
 ## 1. 读快照
 
@@ -18,7 +18,7 @@ baton status <task>
 - 进展：30 分钟内有没有实质推进；同一条命令反复失败、在同一处来回改，都算停滞。
 - 记录：有代码改动但 log.md 没有新增；改动量已超过 major 阈值却没有汇报。
 
-配置了 `supervision.test_command` 时跑一次。执行者正在改的文件可能处于中间状态，单次失败不直接判为改坏，要结合 diff 看失败是否由执行者的改动引起。
+配置了 `supervision.test_command` 时跑一次。Claude executor 的默认工具白名单会从这个命令生成；执行者正在改的文件可能处于中间状态，单次失败不直接判为改坏，要结合 diff 看失败是否由执行者的改动引起。
 
 ## 3. 给结论并处理
 

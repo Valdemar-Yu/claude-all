@@ -1,0 +1,8 @@
+{
+  "chief_model": "opus",
+  "chief_backend": "",
+  "councilors": [
+    "council-cc-opus",
+    "council-codex-sol"
+  ]
+}
